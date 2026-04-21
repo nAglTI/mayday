@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="kalpn_primary">#EA580C</color>
+    <color name="kalpn_primary_dark">#C2410C</color>
+    <color name="kalpn_surface">#FFF8FAFC</color>
+    <color name="kalpn_on_surface">#FF111827</color>
+    <color name="kalpn_on_surface_variant">#FF475569</color>
+    <color name="kalpn_nav_unselected">#7B8794</color>
+</resources>

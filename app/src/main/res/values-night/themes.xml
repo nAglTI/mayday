@@ -1,0 +1,11 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.KALPN" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/kalpn_primary</item>
+        <item name="colorPrimaryContainer">@color/kalpn_primary_dark</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@color/kalpn_surface</item>
+        <item name="colorSurface">@color/kalpn_surface</item>
+        <item name="colorOnSurface">@color/kalpn_on_surface</item>
+        <item name="colorOnSurfaceVariant">@color/kalpn_on_surface_variant</item>
+    </style>
+</resources>

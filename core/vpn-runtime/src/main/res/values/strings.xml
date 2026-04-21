@@ -1,0 +1,4 @@
+<resources>
+    <string name="kalpn_vpn_channel_name">KALPN VPN</string>
+    <string name="kalpn_vpn_channel_description">Foreground channel for the KALPN VPN shell.</string>
+</resources>
