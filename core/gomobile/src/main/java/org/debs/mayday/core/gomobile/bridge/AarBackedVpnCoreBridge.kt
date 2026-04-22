@@ -66,7 +66,6 @@ class AarBackedVpnCoreBridge @Inject constructor() : VpnCoreBridge {
                 "vpncore runner is not active, cannot swap TUN."
             }
             activeRunner.swapTun(tunFileDescriptor.toLong())
-            Unit
         }.onFailure {
             Log.e(TAG, "Refresh request failed.")
         }

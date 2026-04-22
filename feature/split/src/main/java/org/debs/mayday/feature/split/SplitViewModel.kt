@@ -29,19 +29,28 @@ class SplitViewModel @Inject constructor(
     private var allApps: List<InstalledApp> = emptyList()
 
     init {
+        refresh()
+    }
+
+    fun refresh() {
         viewModelScope.launch {
             val profile = profileRepository.profile.first()
             val uiPreferences = uiPreferencesRepository.preferences.first()
-            allApps = installedAppsRepository.getInstalledApps()
+            if (allApps.isEmpty()) {
+                allApps = installedAppsRepository.getInstalledApps()
+            }
+            val currentState = uiState.value
             mutableState.value = SplitUiState(
                 uiPreferences = uiPreferences,
                 splitTunnelMode = profile.splitTunnelMode,
                 installedApps = filterApps(
-                    showSystemApps = false,
-                    query = "",
+                    showSystemApps = currentState.showSystemApps,
+                    query = currentState.appSearchQuery,
                     selectedPackages = profile.selectedPackages,
                 ),
                 selectedPackages = profile.selectedPackages,
+                showSystemApps = currentState.showSystemApps,
+                appSearchQuery = currentState.appSearchQuery,
                 isLoading = false,
             )
         }
@@ -87,11 +96,16 @@ class SplitViewModel @Inject constructor(
         viewModelScope.launch {
             update { copy(isLoading = true, message = null) }
             runCatching {
+                val selectedPackages = uiState.value.selectedPackages
+                    .asSequence()
+                    .map(String::trim)
+                    .filter(String::isNotBlank)
+                    .toSet()
                 val latestProfile = profileRepository.profile.first()
                 profileRepository.save(
                     latestProfile.copy(
                         splitTunnelMode = uiState.value.splitTunnelMode,
-                        selectedPackages = uiState.value.selectedPackages,
+                        selectedPackages = selectedPackages,
                     ),
                 )
             }.onSuccess {

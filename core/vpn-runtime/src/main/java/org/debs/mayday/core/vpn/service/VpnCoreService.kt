@@ -3,11 +3,16 @@ package org.debs.mayday.core.vpn.service
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
+import android.os.Build
+import android.content.pm.PackageManager
+import android.net.ConnectivityManager
 import android.net.VpnService
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.os.Process
+import android.system.OsConstants
 import android.util.Log
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
@@ -29,6 +34,8 @@ import org.debs.mayday.core.vpn.controller.VpnConnectionStateStore
 import org.debs.mayday.core.vpn.notification.VpnNotificationFactory
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.net.InetAddress
+import java.net.InetSocketAddress
 import javax.inject.Inject
 
 @AndroidEntryPoint
@@ -206,6 +213,81 @@ class VpnCoreService : VpnService() {
         }
     }
 
+    private val connectivityManager: ConnectivityManager by lazy {
+        getSystemService(ConnectivityManager::class.java)
+    }
+
+    /**
+     * Возвращает пакеты-владельцы соединения по 5-tuple.
+     *
+     * srcIp/srcPort/dstIp/dstPort можно передавать прямо из распарсенного IP-пакета.
+     * Для надежности пробуем и прямое направление, и обратное — это полезно,
+     * если в TUN приходят как исходящие, так и входящие пакеты.
+     */
+    private fun resolveOwnerPackages(
+        protocol: Int = OsConstants.IPPROTO_TCP,
+        srcIp: InetAddress,
+        srcPort: Int,
+        dstIp: InetAddress,
+        dstPort: Int
+    ): List<String> {
+        require(
+            protocol == OsConstants.IPPROTO_TCP || protocol == OsConstants.IPPROTO_UDP
+        ) {
+            "Unsupported protocol: $protocol. Only TCP/UDP are supported."
+        }
+
+        val forwardLocal = InetSocketAddress(srcIp, srcPort)
+        val forwardRemote = InetSocketAddress(dstIp, dstPort)
+
+        val uidForward = runCatching {
+            connectivityManager.getConnectionOwnerUid(
+                protocol,
+                forwardLocal,
+                forwardRemote
+            )
+        }.getOrElse { error ->
+            return when (error) {
+                is SecurityException -> {
+                    // Сервис не является активным VpnService для текущего пользователя
+                    emptyList()
+                }
+
+                is IllegalArgumentException -> {
+                    // Неподдерживаемый protocol
+                    emptyList()
+                }
+
+                else -> emptyList()
+            }
+        }
+
+        return if (uidForward != Process.INVALID_UID) {
+            packageManager.getPackagesForUid(uidForward)?.toList().orEmpty()
+        } else emptyList()
+
+        // Fallback: пробуем обратное направление.
+//        val reverseLocal = InetSocketAddress(dstIp, dstPort)
+//        val reverseRemote = InetSocketAddress(srcIp, srcPort)
+//
+//        val uidReverse = runCatching {
+//            connectivityManager.getConnectionOwnerUid(
+//                protocol,
+//                reverseLocal,
+//                reverseRemote
+//            )
+//        }.getOrElse {
+//            return emptyList()
+//        }
+//
+//        if (uidReverse == Process.INVALID_UID) {
+//            // flow не найден или не относится к вашему VPN
+//            return emptyList()
+//        }
+//
+//        return packageManager.getPackagesForUid(uidReverse)?.toList().orEmpty()
+    }
+
     private fun buildTun(
         profile: VpnProfile,
         ip: String,
@@ -216,6 +298,7 @@ class VpnCoreService : VpnService() {
             .setMtu(profile.mtu)
             .addAddress(ip, prefix)
             .addRoute("0.0.0.0", 0)
+            .applySplitTunnel(profile)
 
         profile.dnsServers.forEach { dns ->
             if (dns.isNotBlank()) {
@@ -223,7 +306,6 @@ class VpnCoreService : VpnService() {
             }
         }
 
-        applySplitTunnel(builder, profile)
         return builder.establish()?.detachFd()
     }
 
@@ -270,11 +352,27 @@ class VpnCoreService : VpnService() {
                 }
 
                 Log.d(TAG, "Starting interface refresh.")
-                val newTunFd = buildTun(
-                    profile = profile,
-                    ip = ip,
-                    prefix = SWAPPED_PREFIX,
-                ) ?: run {
+                val newTunFd = runCatching {
+                    buildTun(
+                        profile = profile,
+                        ip = ip,
+                        prefix = SWAPPED_PREFIX,
+                    )
+                }.getOrElse { error ->
+                    pendingAssignedIp = null
+                    shouldStop = true
+                    publishState(
+                        VpnRuntimeState(
+                            status = VpnConnectionStatus.Error,
+                            headline = "TUN hot-swap failed",
+                            detail = error.message ?: "Unable to rebuild the interface for the refreshed address.",
+                            engineAvailable = vpnCoreBridge.isLinked,
+                            activeProfileSummary = currentProfileSummary,
+                            engineDiagnostics = vpnCoreBridge.linkErrorMessage,
+                        ),
+                    )
+                    return@withLock
+                } ?: run {
                     pendingAssignedIp = null
                     shouldStop = true
                     publishState(
@@ -337,20 +435,89 @@ class VpnCoreService : VpnService() {
         }
     }
 
-    private fun applySplitTunnel(builder: Builder, profile: VpnProfile) {
-        when (profile.splitTunnelMode) {
-            SplitTunnelMode.DISABLED -> Unit
-            SplitTunnelMode.ONLY_SELECTED -> {
-                profile.selectedPackages.forEach { packageName ->
-                    runCatching { builder.addAllowedApplication(packageName) }
+    private fun Builder.applySplitTunnel(profile: VpnProfile): Builder {
+        val splitMode = profile.splitTunnelMode
+        if (splitMode == SplitTunnelMode.DISABLED) {
+            return this
+        }
+
+        val selectedPackages = profile.selectedPackages
+            .asSequence()
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .distinct()
+            .toList()
+
+        if (splitMode == SplitTunnelMode.EXCLUDE_SELECTED && selectedPackages.isEmpty()) {
+            return this
+        }
+
+        val useAllowedApplications = splitMode == SplitTunnelMode.ONLY_SELECTED && selectedPackages.isNotEmpty()
+        val routingPackages = when {
+            selectedPackages.isNotEmpty() -> selectedPackages
+            splitMode == SplitTunnelMode.ONLY_SELECTED -> resolveInstalledPackageNames()
+            else -> emptyList()
+        }
+
+        require(routingPackages.isNotEmpty()) {
+            "Unable to resolve installed applications for app routing."
+        }
+
+        val failedPackages = mutableListOf<String>()
+        routingPackages.forEach { packageName ->
+            runCatching {
+                if (useAllowedApplications) {
+                    addAllowedApplication(packageName)
+                } else {
+                    addDisallowedApplication(packageName)
                 }
-            }
-            SplitTunnelMode.EXCLUDE_SELECTED -> {
-                profile.selectedPackages.forEach { packageName ->
-                    runCatching { builder.addDisallowedApplication(packageName) }
+            }.onFailure { error ->
+                failedPackages += packageName
+                when (error) {
+                    is PackageManager.NameNotFoundException -> {
+                        Log.w(TAG, "App routing entry is no longer installed.")
+                    }
+                    else -> {
+                        Log.w(TAG, "Failed to apply app routing entry.")
+                    }
                 }
             }
         }
+
+        if (failedPackages.isNotEmpty()) {
+            throw IllegalStateException(
+                if (failedPackages.size == routingPackages.size) {
+                    "Unable to apply any app routing rules. Refresh the selected apps list."
+                } else {
+                    "Unable to apply all app routing rules. Refresh the selected apps list."
+                },
+            )
+        }
+
+        Log.d(
+            TAG,
+            "Applied routing mode $splitMode using " +
+                (if (useAllowedApplications) "allowed" else "disallowed") +
+                " list with ${routingPackages.size} entries.",
+        )
+        return this
+    }
+
+    private fun resolveInstalledPackageNames(): List<String> {
+        val installedApplications = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            packageManager.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            packageManager.getInstalledApplications(0)
+        }
+
+        return installedApplications
+            .asSequence()
+            .map { it.packageName.trim() }
+            .filter(String::isNotBlank)
+            .distinct()
+            .sorted()
+            .toList()
     }
 
     private fun stopVpn() {

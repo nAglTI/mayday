@@ -18,6 +18,11 @@ class SplitFragment : Fragment() {
 
     private val viewModel: SplitViewModel by viewModels()
 
+    override fun onResume() {
+        super.onResume()
+        viewModel.refresh()
+    }
+
     override fun onCreateView(
         inflater: android.view.LayoutInflater,
         container: android.view.ViewGroup?,
