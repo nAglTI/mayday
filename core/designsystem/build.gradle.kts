@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "org.debs.kalpn.core.designsystem"
+    namespace = "org.debs.mayday.core.designsystem"
     compileSdk = 36
 
     defaultConfig {
@@ -32,6 +32,7 @@ kotlin {
 dependencies {
     implementation(project(":core:model"))
 
+    implementation(libs.androidx.core.ktx)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.foundation)
     implementation(libs.androidx.compose.material3)

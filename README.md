@@ -1,4 +1,4 @@
-# KALPN Android
+# mayday Android
 
 Android VPN client shell for the `vpncore.aar` Go runtime. The app provides:
 

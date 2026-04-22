@@ -7,7 +7,7 @@ plugins {
 }
 
 android {
-    namespace = "org.debs.kalpn.core.vpn"
+    namespace = "org.debs.mayday.core.vpn"
     compileSdk = 36
 
     defaultConfig {

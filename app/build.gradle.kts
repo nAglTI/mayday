@@ -8,11 +8,11 @@ plugins {
 }
 
 android {
-    namespace = "org.debs.kalpn"
+    namespace = "org.debs.mayday"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "org.debs.kalpn"
+        applicationId = "org.debs.mayday"
         minSdk = 29
         targetSdk = 36
         versionCode = 1
@@ -50,8 +50,10 @@ kotlin {
 dependencies {
     implementation(project(":core:designsystem"))
     implementation(project(":core:vpn-runtime"))
+    implementation(project(":feature:onboarding"))
     implementation(project(":feature:home"))
     implementation(project(":feature:settings"))
+    implementation(project(":feature:split"))
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
 
     implementation(platform(libs.androidx.compose.bom))

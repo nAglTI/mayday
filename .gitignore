@@ -3,7 +3,6 @@
 /local.properties
 /.idea
 .DS_Store
-/build
 /captures
 .externalNativeBuild
 .cxx
@@ -12,17 +11,5 @@ local.properties
 /app/libs/vpncore-sources.jar
 /core/gomobile/libs/vpncore-classes.jar
 /goAndroidBuild/
-
-# Project exclude paths
-/core/data/build/
-/core/data/build/intermediates/javac/debug/compileDebugJavaWithJavac/classes/
-/core/designsystem/build/
-/core/gomobile/build/
-/core/gomobile/build/intermediates/javac/debug/compileDebugJavaWithJavac/classes/
-/core/model/build/
-/core/vpn-runtime/build/
-/core/vpn-runtime/build/intermediates/javac/debug/compileDebugJavaWithJavac/classes/
-/feature/home/build/
-/feature/home/build/intermediates/javac/debug/compileDebugJavaWithJavac/classes/
-/feature/settings/build/
-/feature/settings/build/intermediates/javac/debug/compileDebugJavaWithJavac/classes/
+/design/
+**/build/

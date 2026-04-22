@@ -22,12 +22,14 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "KALPN"
+rootProject.name = "mayday"
 include(":app")
 include(":core:model")
 include(":core:data")
 include(":core:designsystem")
 include(":core:gomobile")
 include(":core:vpn-runtime")
+include(":feature:onboarding")
 include(":feature:home")
 include(":feature:settings")
+include(":feature:split")
