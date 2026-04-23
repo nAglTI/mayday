@@ -1,6 +1,7 @@
 package org.debs.mayday.core.data.repository
 
 import android.content.Context
+import android.util.Log
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -8,6 +9,10 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import org.debs.mayday.core.model.SplitTunnelMode
@@ -23,6 +28,7 @@ class DefaultVpnProfileRepository @Inject constructor(
     private val dataStore: DataStore<Preferences>,
     @ApplicationContext private val context: Context,
 ) : VpnProfileRepository {
+    private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override val profile: Flow<VpnProfile> = dataStore.data.map { preferences ->
         VpnProfile(
@@ -54,6 +60,16 @@ class DefaultVpnProfileRepository @Inject constructor(
     }
 
     override suspend fun save(profile: VpnProfile) {
+        repositoryScope.async {
+            runCatching { persistProfile(profile) }
+                .onFailure { error ->
+                    Log.e(TAG, "Failed to persist profile.", error)
+                }
+                .getOrThrow()
+        }.await()
+    }
+
+    private suspend fun persistProfile(profile: VpnProfile) {
         dataStore.edit { preferences ->
             preferences[PROFILE_NAME] = profile.profileName.trim().ifEmpty { "Primary" }
             preferences[RELAY_HOST] = profile.relayHost.trim()
@@ -92,6 +108,7 @@ class DefaultVpnProfileRepository @Inject constructor(
     }
 
     private companion object {
+        const val TAG = "ProfileRepo"
         val PROFILE_NAME = stringPreferencesKey("profile_name")
         val RELAY_HOST = stringPreferencesKey("relay_host")
         val RELAY_PORT = intPreferencesKey("relay_port")
