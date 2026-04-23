@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -41,6 +40,8 @@ import org.debs.mayday.core.designsystem.component.MaydayTopBar
 import org.debs.mayday.core.designsystem.theme.LocalMaydayDensity
 import org.debs.mayday.core.designsystem.theme.MaydayStrings
 import org.debs.mayday.core.designsystem.theme.maydayStrings
+import org.debs.mayday.core.designsystem.theme.serverCountLabel
+import org.debs.mayday.core.designsystem.theme.serverTitle
 import org.debs.mayday.core.model.AppDensity
 import org.debs.mayday.core.model.AppLanguage
 import org.debs.mayday.core.model.AppThemeMode
@@ -49,27 +50,7 @@ import org.debs.mayday.core.model.SplitTunnelMode
 @Composable
 internal fun SettingsScreen(
     state: SettingsUiState,
-    onBackClick: () -> Unit,
-    onProfileNameChanged: (String) -> Unit,
-    onRelayHostChanged: (String) -> Unit,
-    onRelayPortChanged: (String) -> Unit,
-    onUserIdChanged: (String) -> Unit,
-    onTunNameChanged: (String) -> Unit,
-    onDnsChanged: (String) -> Unit,
-    onMtuChanged: (String) -> Unit,
-    onAutoReconnectChanged: (Boolean) -> Unit,
-    onThemeModeChanged: (AppThemeMode) -> Unit,
-    onLanguageChanged: (AppLanguage) -> Unit,
-    onDensityChanged: (AppDensity) -> Unit,
-    onOpenSplitClick: () -> Unit,
-    onSaveClick: () -> Unit,
-    onImportClick: () -> Unit,
-    onAddServerClick: () -> Unit,
-    onRemoveServerClick: (Int) -> Unit,
-    onServerIdChanged: (Int, String) -> Unit,
-    onServerKeyChanged: (Int, String) -> Unit,
-    onServerPriorityChanged: (Int, String) -> Unit,
-    onMessageConsumed: () -> Unit,
+    onEvent: (SettingsUiEvent) -> Unit,
 ) {
     val strings = maydayStrings(state.language)
     val density = LocalMaydayDensity.current
@@ -78,7 +59,7 @@ internal fun SettingsScreen(
     LaunchedEffect(state.message) {
         val message = state.message ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(message)
-        onMessageConsumed()
+        onEvent(SettingsUiEvent.MessageShown)
     }
 
     MaydayScreenBackground(modifier = Modifier.fillMaxSize()) {
@@ -87,37 +68,36 @@ internal fun SettingsScreen(
             snackbarHost = { SnackbarHost(snackbarHostState) },
             bottomBar = {
                 MaydayBottomActionBar(
-                    primaryText = if (state.isLoading) "saving..." else strings.saveProfile,
-                    onPrimaryClick = onSaveClick,
+                    primaryText = if (state.isLoading) strings.saving else strings.saveProfile,
+                    onPrimaryClick = { onEvent(SettingsUiEvent.SaveClicked) },
                     enabled = !state.isLoading,
-                    supportingText = "${state.servers.size} server(s) | ${routingSummary(strings, state.splitTunnelMode, state.selectedPackageCount)}",
+                    supportingText = "${strings.serverCountLabel(state.servers.size)} | ${routingSummary(strings, state.splitTunnelMode, state.selectedPackageCount)}",
                 )
             },
         ) { innerPadding ->
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
-                    .statusBarsPadding()
-                    .padding(innerPadding),
+                    .statusBarsPadding(),
                 contentPadding = PaddingValues(
                     start = density.screenPadding,
                     end = density.screenPadding,
-                    top = 6.dp,
-                    bottom = density.sectionGap,
+                    top = innerPadding.calculateTopPadding() + 6.dp,
+                    bottom = innerPadding.calculateBottomPadding() + density.sectionGap,
                 ),
                 verticalArrangement = Arrangement.spacedBy(density.sectionGap),
             ) {
                 item {
                     MaydayTopBar(
                         title = strings.settings,
-                        onBackClick = onBackClick,
+                        onBackClick = { onEvent(SettingsUiEvent.BackClicked) },
                         applyHorizontalPadding = false,
                     )
                 }
 
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        MaydaySectionTitle(text = "${strings.theme} В· ${strings.language}")
+                        MaydaySectionTitle(text = "${strings.theme} / ${strings.language}")
                         MaydaySurfaceCard {
                             SettingsChoiceRow(
                                 label = strings.language,
@@ -126,7 +106,7 @@ internal fun SettingsScreen(
                                     AppLanguage.EN to "en",
                                     AppLanguage.RU to "ru",
                                 ),
-                                onSelect = { onLanguageChanged(it as AppLanguage) },
+                                onSelect = { onEvent(SettingsUiEvent.LanguageChanged(it as AppLanguage)) },
                             )
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                             SettingsChoiceRow(
@@ -136,7 +116,7 @@ internal fun SettingsScreen(
                                     AppThemeMode.LIGHT to strings.light,
                                     AppThemeMode.DARK to strings.dark,
                                 ),
-                                onSelect = { onThemeModeChanged(it as AppThemeMode) },
+                                onSelect = { onEvent(SettingsUiEvent.ThemeModeChanged(it as AppThemeMode)) },
                             )
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                             SettingsChoiceRow(
@@ -146,7 +126,7 @@ internal fun SettingsScreen(
                                     AppDensity.COMPACT to strings.compact,
                                     AppDensity.COMFORTABLE to strings.comfortable,
                                 ),
-                                onSelect = { onDensityChanged(it as AppDensity) },
+                                onSelect = { onEvent(SettingsUiEvent.DensityChanged(it as AppDensity)) },
                             )
                         }
                     }
@@ -156,11 +136,31 @@ internal fun SettingsScreen(
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         MaydaySectionTitle(text = strings.profile)
                         MaydaySurfaceCard {
-                            SettingsField("profile", state.profileName, onProfileNameChanged)
-                            SettingsField(strings.relay, state.relayHost, onRelayHostChanged)
-                            SettingsNumberField("port", state.relayPort, onRelayPortChanged)
-                            SettingsNumberField(strings.userId, state.userId, onUserIdChanged)
-                            SettingsField("tun", state.tunName, onTunNameChanged)
+                            SettingsField(
+                                label = strings.profileField,
+                                value = state.profileName,
+                                onValueChange = { onEvent(SettingsUiEvent.ProfileNameChanged(it)) },
+                            )
+                            SettingsField(
+                                label = strings.relay,
+                                value = state.relayHost,
+                                onValueChange = { onEvent(SettingsUiEvent.RelayHostChanged(it)) },
+                            )
+                            SettingsNumberField(
+                                label = strings.port,
+                                value = state.relayPort,
+                                onValueChange = { onEvent(SettingsUiEvent.RelayPortChanged(it)) },
+                            )
+                            SettingsNumberField(
+                                label = strings.userId,
+                                value = state.userId,
+                                onValueChange = { onEvent(SettingsUiEvent.UserIdChanged(it)) },
+                            )
+                            SettingsField(
+                                label = strings.tun,
+                                value = state.tunName,
+                                onValueChange = { onEvent(SettingsUiEvent.TunNameChanged(it)) },
+                            )
                         }
                     }
                 }
@@ -169,14 +169,22 @@ internal fun SettingsScreen(
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         MaydaySectionTitle(text = strings.advanced)
                         MaydaySurfaceCard {
-                            SettingsField(strings.dns, state.dnsServers, onDnsChanged)
-                            SettingsNumberField("mtu", state.mtu, onMtuChanged)
+                            SettingsField(
+                                label = strings.dns,
+                                value = state.dnsServers,
+                                onValueChange = { onEvent(SettingsUiEvent.DnsChanged(it)) },
+                            )
+                            SettingsNumberField(
+                                label = strings.mtu,
+                                value = state.mtu,
+                                onValueChange = { onEvent(SettingsUiEvent.MtuChanged(it)) },
+                            )
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                             SettingSwitchRow(
                                 title = strings.autoFailover,
-                                subtitle = "keep the session alive when the active path changes",
+                                subtitle = strings.keepSessionAliveHint,
                                 checked = state.autoReconnect,
-                                onCheckedChange = onAutoReconnectChanged,
+                                onCheckedChange = { onEvent(SettingsUiEvent.AutoReconnectChanged(it)) },
                             )
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -186,21 +194,21 @@ internal fun SettingsScreen(
                                 )
                                 MaydayActionButton(
                                     text = strings.splitRouting,
-                                    onClick = onOpenSplitClick,
+                                    onClick = { onEvent(SettingsUiEvent.OpenSplitClicked) },
                                     modifier = Modifier.fillMaxWidth(),
                                     filled = false,
                                 )
                             }
                             state.importedConfigName?.let { imported ->
                                 Text(
-                                    text = "Imported from $imported",
+                                    text = "${strings.importedFrom} $imported",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                             MaydayActionButton(
                                 text = strings.importConfig,
-                                onClick = onImportClick,
+                                onClick = { onEvent(SettingsUiEvent.ImportClicked) },
                                 modifier = Modifier.fillMaxWidth(),
                                 filled = false,
                             )
@@ -210,16 +218,16 @@ internal fun SettingsScreen(
 
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        MaydaySectionTitle(text = "servers")
+                        MaydaySectionTitle(text = strings.servers)
                         MaydaySurfaceCard {
                             Text(
-                                text = "vpncore receives the full servers[] array and picks the target on its own.",
+                                text = strings.serversHint,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             MaydayActionButton(
-                                text = "add server",
-                                onClick = onAddServerClick,
+                                text = strings.addServer,
+                                onClick = { onEvent(SettingsUiEvent.AddServerClicked) },
                                 modifier = Modifier.fillMaxWidth(),
                                 filled = false,
                             )
@@ -235,14 +243,14 @@ internal fun SettingsScreen(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(
-                                text = "server ${index + 1}",
+                                text = strings.serverTitle(index + 1),
                                 style = MaterialTheme.typography.titleLarge,
                                 fontWeight = FontWeight.Medium,
                                 color = MaterialTheme.colorScheme.onSurface,
                             )
                             MaydayActionButton(
-                                text = "remove",
-                                onClick = { onRemoveServerClick(index) },
+                                text = strings.remove,
+                                onClick = { onEvent(SettingsUiEvent.RemoveServerClicked(index)) },
                                 modifier = Modifier
                                     .width(124.dp)
                                     .height(44.dp),
@@ -250,9 +258,21 @@ internal fun SettingsScreen(
                                 filled = false,
                             )
                         }
-                        SettingsField("server id", server.id, onValueChange = { onServerIdChanged(index, it) })
-                        SettingsField("server key", server.key, onValueChange = { onServerKeyChanged(index, it) })
-                        SettingsNumberField("priority", server.priority, onValueChange = { onServerPriorityChanged(index, it) })
+                        SettingsField(
+                            label = strings.serverId,
+                            value = server.id,
+                            onValueChange = { onEvent(SettingsUiEvent.ServerIdChanged(index, it)) },
+                        )
+                        SettingsField(
+                            label = strings.serverKey,
+                            value = server.key,
+                            onValueChange = { onEvent(SettingsUiEvent.ServerKeyChanged(index, it)) },
+                        )
+                        SettingsNumberField(
+                            label = strings.priority,
+                            value = server.priority,
+                            onValueChange = { onEvent(SettingsUiEvent.ServerPriorityChanged(index, it)) },
+                        )
                     }
                 }
             }
@@ -278,6 +298,9 @@ private fun SettingsChoiceRow(
             selected = selected,
             onSelect = onSelect,
             equalWidth = true,
+            minItemHeight = 40.dp,
+            itemVerticalPadding = 8.dp,
+            maxLines = 1,
         )
     }
 }

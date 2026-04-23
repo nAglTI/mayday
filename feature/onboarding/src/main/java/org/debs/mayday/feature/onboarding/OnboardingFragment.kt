@@ -16,7 +16,9 @@ import androidx.fragment.app.viewModels
 import androidx.navigation.NavOptions
 import androidx.navigation.fragment.findNavController
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.flow.collectLatest
 import org.debs.mayday.core.designsystem.theme.MaydayTheme
+import org.debs.mayday.core.designsystem.theme.maydayStrings
 
 @AndroidEntryPoint
 class OnboardingFragment : Fragment() {
@@ -29,6 +31,7 @@ class OnboardingFragment : Fragment() {
         uri ?: return@registerForActivityResult
 
         val context = requireContext()
+        val strings = maydayStrings(viewModel.uiState.value.uiPreferences.language)
         runCatching {
             context.contentResolver.takePersistableUriPermission(
                 uri,
@@ -41,13 +44,22 @@ class OnboardingFragment : Fragment() {
             context.contentResolver.openInputStream(uri)
                 ?.bufferedReader()
                 ?.use { it.readText() }
-                ?: error("Unable to open the selected config file.")
+                ?: error(strings.unableToOpenSelectedConfigFile)
         }.getOrElse { error ->
-            viewModel.showMessage(error.message ?: "Failed to read the selected file.")
+            viewModel.onEvent(
+                OnboardingUiEvent.ImportSelectionFailed(
+                    error.message ?: strings.failedReadSelectedFile,
+                ),
+            )
             return@registerForActivityResult
         }
 
-        viewModel.importConfig(rawConfig, sourceName)
+        viewModel.onEvent(
+            OnboardingUiEvent.ConfigSelected(
+                rawConfig = rawConfig,
+                sourceName = sourceName,
+            ),
+        )
     }
 
     override fun onCreateView(
@@ -61,37 +73,43 @@ class OnboardingFragment : Fragment() {
                 val state by viewModel.uiState.collectAsState()
                 MaydayTheme(
                     themeMode = state.uiPreferences.themeMode,
+                    language = state.uiPreferences.language,
                     density = state.uiPreferences.density,
                 ) {
-                    LaunchedEffect(state.navigationTarget) {
-                        when (state.navigationTarget) {
-                            OnboardingNavigationTarget.HOME -> {
-                                findNavController().navigate(
-                                    Uri.parse("mayday://home"),
-                                    NavOptions.Builder()
-                                        .setPopUpTo(findNavController().graph.startDestinationId, true)
-                                        .build(),
-                                )
-                                viewModel.onNavigationHandled()
+                    LaunchedEffect(Unit) {
+                        viewModel.effect.collectLatest { effect ->
+                            when (effect) {
+                                OnboardingUiEffect.OpenConfigPicker -> {
+                                    importConfigLauncher.launch(arrayOf("*/*"))
+                                }
+                                OnboardingUiEffect.NavigateHome -> {
+                                    findNavController().navigate(
+                                        Uri.parse("mayday://home"),
+                                        NavOptions.Builder()
+                                            .setPopUpTo(
+                                                findNavController().graph.startDestinationId,
+                                                true,
+                                            )
+                                            .build(),
+                                    )
+                                }
+                                OnboardingUiEffect.NavigateToSettings -> {
+                                    findNavController().navigate(
+                                        Uri.parse("mayday://settings"),
+                                        NavOptions.Builder()
+                                            .setPopUpTo(
+                                                findNavController().graph.startDestinationId,
+                                                true,
+                                            )
+                                            .build(),
+                                    )
+                                }
                             }
-                            OnboardingNavigationTarget.SETTINGS -> {
-                                findNavController().navigate(
-                                    Uri.parse("mayday://settings"),
-                                    NavOptions.Builder()
-                                        .setPopUpTo(findNavController().graph.startDestinationId, true)
-                                        .build(),
-                                )
-                                viewModel.onNavigationHandled()
-                            }
-                            null -> Unit
                         }
                     }
                     OnboardingScreen(
                         state = state,
-                        onImportClick = { importConfigLauncher.launch(arrayOf("*/*")) },
-                        onManualClick = viewModel::openManualSetup,
-                        onContinueClick = viewModel::continueWithoutImport,
-                        onMessageConsumed = viewModel::onMessageConsumed,
+                        onEvent = viewModel::onEvent,
                     )
                 }
             }

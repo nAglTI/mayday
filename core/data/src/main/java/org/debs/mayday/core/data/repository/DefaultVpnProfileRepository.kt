@@ -1,11 +1,13 @@
 package org.debs.mayday.core.data.repository
 
+import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import org.debs.mayday.core.model.SplitTunnelMode
@@ -19,6 +21,7 @@ import javax.inject.Singleton
 @Singleton
 class DefaultVpnProfileRepository @Inject constructor(
     private val dataStore: DataStore<Preferences>,
+    @ApplicationContext private val context: Context,
 ) : VpnProfileRepository {
 
     override val profile: Flow<VpnProfile> = dataStore.data.map { preferences ->
@@ -43,6 +46,7 @@ class DefaultVpnProfileRepository @Inject constructor(
                 ?.split('|')
                 ?.map(String::trim)
                 ?.filter(String::isNotBlank)
+                ?.filterNot(::isOwnPackage)
                 ?.toSet()
                 .orEmpty(),
             isAutoReconnectEnabled = preferences[AUTO_RECONNECT] ?: true,
@@ -76,10 +80,15 @@ class DefaultVpnProfileRepository @Inject constructor(
             preferences[SPLIT_MODE] = profile.splitTunnelMode.ordinal
             preferences[SELECTED_PACKAGES] = profile.selectedPackages
                 .filter(String::isNotBlank)
+                .filterNot(::isOwnPackage)
                 .sorted()
                 .joinToString("|")
             preferences[AUTO_RECONNECT] = profile.isAutoReconnectEnabled
         }
+    }
+
+    private fun isOwnPackage(packageName: String): Boolean {
+        return packageName == context.packageName
     }
 
     private companion object {

@@ -4,8 +4,11 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
+import android.view.LayoutInflater
 import android.view.View
+import android.view.ViewGroup
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.ComposeView
@@ -14,7 +17,9 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.navigation.fragment.findNavController
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.flow.collectLatest
 import org.debs.mayday.core.designsystem.theme.MaydayTheme
+import org.debs.mayday.core.designsystem.theme.maydayStrings
 
 @AndroidEntryPoint
 class SettingsFragment : Fragment() {
@@ -27,6 +32,7 @@ class SettingsFragment : Fragment() {
         uri ?: return@registerForActivityResult
 
         val context = requireContext()
+        val strings = maydayStrings(viewModel.uiState.value.uiPreferences.language)
         runCatching {
             context.contentResolver.takePersistableUriPermission(
                 uri,
@@ -39,23 +45,32 @@ class SettingsFragment : Fragment() {
             context.contentResolver.openInputStream(uri)
                 ?.bufferedReader()
                 ?.use { it.readText() }
-                ?: error("Unable to open the selected config file.")
+                ?: error(strings.unableToOpenSelectedConfigFile)
         }.getOrElse { error ->
-            viewModel.showMessage(error.message ?: "Failed to read the selected file.")
+            viewModel.onEvent(
+                SettingsUiEvent.ImportSelectionFailed(
+                    error.message ?: strings.failedReadSelectedFile,
+                ),
+            )
             return@registerForActivityResult
         }
 
-        viewModel.importConfig(rawConfig, sourceName)
+        viewModel.onEvent(
+            SettingsUiEvent.ConfigSelected(
+                rawConfig = rawConfig,
+                sourceName = sourceName,
+            ),
+        )
     }
 
     override fun onResume() {
         super.onResume()
-        viewModel.refreshRoutingSummary()
+        viewModel.onEvent(SettingsUiEvent.RefreshRequested)
     }
 
     override fun onCreateView(
-        inflater: android.view.LayoutInflater,
-        container: android.view.ViewGroup?,
+        inflater: LayoutInflater,
+        container: ViewGroup?,
         savedInstanceState: Bundle?,
     ): View {
         return ComposeView(requireContext()).apply {
@@ -64,33 +79,25 @@ class SettingsFragment : Fragment() {
                 val state by viewModel.uiState.collectAsState()
                 MaydayTheme(
                     themeMode = state.uiPreferences.themeMode,
+                    language = state.uiPreferences.language,
                     density = state.uiPreferences.density,
                 ) {
+                    LaunchedEffect(Unit) {
+                        viewModel.effect.collectLatest { effect ->
+                            when (effect) {
+                                SettingsUiEffect.NavigateBack -> findNavController().popBackStack()
+                                SettingsUiEffect.NavigateToSplit -> {
+                                    findNavController().navigate(Uri.parse("mayday://split"))
+                                }
+                                SettingsUiEffect.OpenConfigPicker -> {
+                                    importConfigLauncher.launch(arrayOf("*/*"))
+                                }
+                            }
+                        }
+                    }
                     SettingsScreen(
                         state = state,
-                        onBackClick = { findNavController().popBackStack() },
-                        onProfileNameChanged = viewModel::onProfileNameChanged,
-                        onRelayHostChanged = viewModel::onRelayHostChanged,
-                        onRelayPortChanged = viewModel::onRelayPortChanged,
-                        onUserIdChanged = viewModel::onUserIdChanged,
-                        onTunNameChanged = viewModel::onTunNameChanged,
-                        onDnsChanged = viewModel::onDnsChanged,
-                        onMtuChanged = viewModel::onMtuChanged,
-                        onAutoReconnectChanged = viewModel::onAutoReconnectChanged,
-                        onThemeModeChanged = viewModel::onThemeModeChanged,
-                        onLanguageChanged = viewModel::onLanguageChanged,
-                        onDensityChanged = viewModel::onDensityChanged,
-                        onOpenSplitClick = {
-                            findNavController().navigate(Uri.parse("mayday://split"))
-                        },
-                        onSaveClick = viewModel::save,
-                        onImportClick = { importConfigLauncher.launch(arrayOf("*/*")) },
-                        onAddServerClick = viewModel::addServer,
-                        onRemoveServerClick = viewModel::removeServer,
-                        onServerIdChanged = viewModel::onServerIdChanged,
-                        onServerKeyChanged = viewModel::onServerKeyChanged,
-                        onServerPriorityChanged = viewModel::onServerPriorityChanged,
-                        onMessageConsumed = viewModel::onMessageConsumed,
+                        onEvent = viewModel::onEvent,
                     )
                 }
             }

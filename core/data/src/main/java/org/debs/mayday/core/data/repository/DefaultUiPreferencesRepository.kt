@@ -5,8 +5,13 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
-import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import org.debs.mayday.core.model.AppDensity
 import org.debs.mayday.core.model.AppLanguage
 import org.debs.mayday.core.model.AppThemeMode
@@ -19,20 +24,26 @@ class DefaultUiPreferencesRepository @Inject constructor(
     private val dataStore: DataStore<Preferences>,
 ) : UiPreferencesRepository {
 
-    override val preferences: Flow<UiPreferences> = dataStore.data.map { preferences ->
-        UiPreferences(
-            themeMode = AppThemeMode.entries.getOrElse(
-                preferences[THEME_MODE] ?: AppThemeMode.DARK.ordinal,
-            ) { AppThemeMode.DARK },
-            language = AppLanguage.entries.getOrElse(
-                preferences[LANGUAGE] ?: AppLanguage.EN.ordinal,
-            ) { AppLanguage.EN },
-            density = AppDensity.entries.getOrElse(
-                preferences[DENSITY] ?: AppDensity.COMFORTABLE.ordinal,
-            ) { AppDensity.COMFORTABLE },
-            onboardingCompleted = preferences[ONBOARDING_COMPLETED] ?: false,
+    override val preferences: StateFlow<UiPreferences> = dataStore.data
+        .map { preferences ->
+            UiPreferences(
+                themeMode = AppThemeMode.entries.getOrElse(
+                    preferences[THEME_MODE] ?: AppThemeMode.DARK.ordinal,
+                ) { AppThemeMode.DARK },
+                language = AppLanguage.entries.getOrElse(
+                    preferences[LANGUAGE] ?: AppLanguage.EN.ordinal,
+                ) { AppLanguage.EN },
+                density = AppDensity.entries.getOrElse(
+                    preferences[DENSITY] ?: AppDensity.COMFORTABLE.ordinal,
+                ) { AppDensity.COMFORTABLE },
+                onboardingCompleted = preferences[ONBOARDING_COMPLETED] ?: false,
+            )
+        }
+        .stateIn(
+            scope = repositoryScope,
+            started = SharingStarted.Eagerly,
+            initialValue = UiPreferences(),
         )
-    }
 
     override suspend fun setThemeMode(themeMode: AppThemeMode) {
         dataStore.edit { preferences ->
@@ -59,6 +70,7 @@ class DefaultUiPreferencesRepository @Inject constructor(
     }
 
     private companion object {
+        val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val THEME_MODE = intPreferencesKey("ui_theme_mode")
         val LANGUAGE = intPreferencesKey("ui_language")
         val DENSITY = intPreferencesKey("ui_density")

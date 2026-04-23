@@ -6,5 +6,4 @@ data class OnboardingUiState(
     val uiPreferences: UiPreferences = UiPreferences(),
     val isLoading: Boolean = true,
     val message: String? = null,
-    val navigationTarget: OnboardingNavigationTarget? = null,
 )

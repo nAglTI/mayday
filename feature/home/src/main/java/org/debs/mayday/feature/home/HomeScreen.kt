@@ -26,23 +26,22 @@ import org.debs.mayday.core.designsystem.component.MaydayTopBar
 import org.debs.mayday.core.designsystem.theme.LocalMaydayDensity
 import org.debs.mayday.core.designsystem.theme.MaydayStrings
 import org.debs.mayday.core.designsystem.theme.maydayStrings
+import org.debs.mayday.core.designsystem.theme.serverCountLabel
 import org.debs.mayday.core.model.SplitTunnelMode
 import org.debs.mayday.core.model.VpnConnectionStatus
 
 @Composable
 internal fun HomeScreen(
     state: HomeUiState,
-    onConnectClick: () -> Unit,
-    onStopClick: () -> Unit,
-    onOpenSettingsClick: () -> Unit,
+    onEvent: (HomeUiEvent) -> Unit,
 ) {
     val strings = maydayStrings(state.uiPreferences.language)
     val density = LocalMaydayDensity.current
     val isConnected = state.status == VpnConnectionStatus.Running
     val isBusy = state.status == VpnConnectionStatus.Starting || state.status == VpnConnectionStatus.Stopping
     val statusText = localizedStatus(strings, state.status)
-    val title = state.primaryServerId.ifBlank { state.profileName }
-    val subtitle = state.endpointSummary.ifBlank { state.detail }
+    val title = state.profileName.ifBlank { strings.profile }
+    val subtitle = state.endpointSummary.ifBlank { strings.relayNotConfigured }
 
     MaydayScreenBackground(modifier = Modifier.fillMaxSize()) {
         Scaffold(
@@ -60,7 +59,7 @@ internal fun HomeScreen(
                 MaydayTopBar(
                     title = strings.appName,
                     trailingText = "...",
-                    onTrailingClick = onOpenSettingsClick,
+                    onTrailingClick = { onEvent(HomeUiEvent.SettingsClicked) },
                 )
 
                 Column(
@@ -78,9 +77,9 @@ internal fun HomeScreen(
                             else -> strings.connect
                         },
                         onActionClick = if (isConnected || state.status == VpnConnectionStatus.Stopping) {
-                            onStopClick
+                            { onEvent(HomeUiEvent.DisconnectClicked) }
                         } else {
-                            onConnectClick
+                            { onEvent(HomeUiEvent.ConnectClicked) }
                         },
                         filledAction = !isConnected,
                         actionEnabled = !isBusy,
@@ -96,12 +95,12 @@ internal fun HomeScreen(
 
                     MaydaySectionTitle(text = strings.diagnostics)
                     MaydaySurfaceCard {
-                        MaydayStatRow(label = "status", value = state.headline.ifBlank { statusText })
-                        MaydayStatRow(label = "detail", value = state.detail.ifBlank { "--" })
-                        MaydayStatRow(label = strings.userId, value = state.userId)
+                        MaydayStatRow(label = strings.status, value = state.headline.ifBlank { statusText })
+                        MaydayStatRow(label = strings.detail, value = state.detail.ifBlank { "--" })
+                        MaydayStatRow(label = strings.userId, value = state.userId.ifBlank { strings.notSet })
                         MaydayStatRow(
-                            label = "engine",
-                            value = if (state.engineAvailable) "ready" else "missing",
+                            label = strings.engine,
+                            value = if (state.engineAvailable) strings.ready else strings.missing,
                             accent = if (state.engineAvailable) {
                                 MaterialTheme.colorScheme.primary
                             } else {
@@ -119,15 +118,18 @@ internal fun HomeScreen(
 
                     MaydaySectionTitle(text = strings.profile)
                     MaydaySurfaceCard {
-                        MaydayStatRow(label = strings.relay, value = state.endpointSummary)
-                        MaydayStatRow(label = "servers", value = state.serverCount.toString())
+                        MaydayStatRow(
+                            label = strings.relay,
+                            value = state.endpointSummary.ifBlank { strings.relayNotConfigured },
+                        )
+                        MaydayStatRow(label = strings.servers, value = strings.serverCountLabel(state.serverCount))
                         MaydayStatRow(
                             label = strings.routingSummary,
                             value = splitSummary(strings, state.splitTunnelMode, state.selectedPackageCount),
                         )
                         MaydayActionButton(
                             text = strings.settings,
-                            onClick = onOpenSettingsClick,
+                            onClick = { onEvent(HomeUiEvent.SettingsClicked) },
                             modifier = Modifier.fillMaxWidth(),
                             filled = false,
                         )

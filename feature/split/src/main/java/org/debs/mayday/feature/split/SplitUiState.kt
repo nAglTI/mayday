@@ -13,5 +13,4 @@ data class SplitUiState(
     val appSearchQuery: String = "",
     val isLoading: Boolean = true,
     val message: String? = null,
-    val shouldClose: Boolean = false,
 )

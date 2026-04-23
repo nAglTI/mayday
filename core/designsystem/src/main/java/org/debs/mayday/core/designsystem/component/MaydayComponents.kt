@@ -11,8 +11,10 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -39,9 +41,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import org.debs.mayday.core.designsystem.theme.LocalMaydayDensity
+import org.debs.mayday.core.designsystem.theme.MaydayStrings
 import org.debs.mayday.core.model.VpnConnectionStatus
 
 @Composable
@@ -340,6 +344,9 @@ fun <T> MaydaySegmentedControl(
     onSelect: (T) -> Unit,
     modifier: Modifier = Modifier,
     equalWidth: Boolean = false,
+    minItemHeight: androidx.compose.ui.unit.Dp = 48.dp,
+    itemVerticalPadding: androidx.compose.ui.unit.Dp = 10.dp,
+    maxLines: Int = 2,
 ) {
     val colors = MaterialTheme.colorScheme
     Surface(
@@ -351,30 +358,26 @@ fun <T> MaydaySegmentedControl(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .height(IntrinsicSize.Min)
                 .padding(3.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            items.forEach { (value, title) ->
+            items.forEachIndexed { index, (value, title) ->
                 val selectedItem = value == selected
+                val segmentModifier = if (equalWidth) {
+                    Modifier.weight(1f)
+                } else {
+                    Modifier
+                }
                 Surface(
-                    modifier = if (equalWidth) {
-                        Modifier
-                            .weight(1f)
-                            .clip(MaterialTheme.shapes.small)
-                            .clickable(
-                                interactionSource = MutableInteractionSource(),
-                                indication = null,
-                                onClick = { onSelect(value) },
-                            )
-                    } else {
-                        Modifier
-                            .clip(MaterialTheme.shapes.small)
-                            .clickable(
-                                interactionSource = MutableInteractionSource(),
-                                indication = null,
-                                onClick = { onSelect(value) },
-                            )
-                    },
+                    modifier = segmentModifier
+                        .fillMaxHeight()
+                        .clip(MaterialTheme.shapes.small)
+                        .clickable(
+                            interactionSource = MutableInteractionSource(),
+                            indication = null,
+                            onClick = { onSelect(value) },
+                        ),
                     shape = MaterialTheme.shapes.small,
                     color = if (selectedItem) colors.surface else Color.Transparent,
                     contentColor = if (selectedItem) colors.onSurface else colors.onSurfaceVariant,
@@ -382,15 +385,27 @@ fun <T> MaydaySegmentedControl(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                            .heightIn(min = minItemHeight)
+                            .padding(horizontal = 12.dp, vertical = itemVerticalPadding),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
                             text = title,
                             style = MaterialTheme.typography.labelLarge,
                             color = if (selectedItem) colors.onSurface else colors.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                            maxLines = maxLines,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
+                }
+                if (index < items.lastIndex) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .width(1.dp)
+                            .background(colors.outlineVariant),
+                    )
                 }
             }
         }
@@ -557,15 +572,14 @@ fun MaydayIconButton(
     }
 }
 
-@Composable
-fun MaydayStatusText(status: VpnConnectionStatus): String {
+fun MaydayStatusText(strings: MaydayStrings, status: VpnConnectionStatus): String {
     return when (status) {
-        VpnConnectionStatus.Idle -> "disconnected"
-        VpnConnectionStatus.Starting -> "connecting"
-        VpnConnectionStatus.Running -> "connected"
-        VpnConnectionStatus.CoreMissing -> "unavailable"
-        VpnConnectionStatus.Stopping -> "disconnecting"
-        VpnConnectionStatus.Error -> "issue"
+        VpnConnectionStatus.Idle -> strings.disconnected
+        VpnConnectionStatus.Starting -> strings.connecting
+        VpnConnectionStatus.Running -> strings.connected
+        VpnConnectionStatus.CoreMissing -> strings.missing
+        VpnConnectionStatus.Stopping -> strings.reconnecting
+        VpnConnectionStatus.Error -> strings.disconnected
     }
 }
 

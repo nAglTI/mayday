@@ -3,15 +3,20 @@ package org.debs.mayday.feature.split
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.debs.mayday.core.data.packageinfo.InstalledAppsRepository
 import org.debs.mayday.core.data.repository.UiPreferencesRepository
 import org.debs.mayday.core.data.repository.VpnProfileRepository
+import org.debs.mayday.core.designsystem.theme.maydayStrings
 import org.debs.mayday.core.model.InstalledApp
 import org.debs.mayday.core.model.SplitTunnelMode
 import javax.inject.Inject
@@ -23,25 +28,68 @@ class SplitViewModel @Inject constructor(
     private val installedAppsRepository: InstalledAppsRepository,
 ) : ViewModel() {
 
-    private val mutableState = MutableStateFlow(SplitUiState())
+    private val mutableState = MutableStateFlow(
+        SplitUiState(uiPreferences = uiPreferencesRepository.preferences.value),
+    )
     val uiState: StateFlow<SplitUiState> = mutableState.asStateFlow()
+    private val effectChannel = Channel<SplitUiEffect>(Channel.BUFFERED)
+    val effect: Flow<SplitUiEffect> = effectChannel.receiveAsFlow()
 
     private var allApps: List<InstalledApp> = emptyList()
 
     init {
-        refresh()
+        viewModelScope.launch {
+            uiPreferencesRepository.preferences.collectLatest { preferences ->
+                mutableState.update { it.copy(uiPreferences = preferences) }
+            }
+        }
     }
 
-    fun refresh() {
+    fun onEvent(event: SplitUiEvent) {
+        when (event) {
+            SplitUiEvent.BackClicked -> emitEffect(SplitUiEffect.NavigateBack)
+            SplitUiEvent.RefreshRequested -> refresh()
+            SplitUiEvent.SaveClicked -> save()
+            SplitUiEvent.MessageShown -> update { copy(message = null) }
+            is SplitUiEvent.ModeChanged -> update {
+                copy(splitTunnelMode = event.value, message = null)
+            }
+            is SplitUiEvent.ShowSystemAppsChanged -> update {
+                copy(
+                    showSystemApps = event.value,
+                    installedApps = filterApps(event.value, appSearchQuery, selectedPackages),
+                )
+            }
+            is SplitUiEvent.SearchQueryChanged -> update {
+                copy(
+                    appSearchQuery = event.value,
+                    installedApps = filterApps(showSystemApps, event.value, selectedPackages),
+                )
+            }
+            is SplitUiEvent.PackageSelectionChanged -> update {
+                val updatedPackages = if (event.selected) {
+                    selectedPackages + event.packageName
+                } else {
+                    selectedPackages - event.packageName
+                }
+                copy(
+                    selectedPackages = updatedPackages,
+                    installedApps = filterApps(showSystemApps, appSearchQuery, updatedPackages),
+                )
+            }
+        }
+    }
+
+    private fun refresh() {
+        val currentState = uiState.value
+        mutableState.update { it.copy(isLoading = true) }
         viewModelScope.launch {
             val profile = profileRepository.profile.first()
-            val uiPreferences = uiPreferencesRepository.preferences.first()
             if (allApps.isEmpty()) {
                 allApps = installedAppsRepository.getInstalledApps()
             }
-            val currentState = uiState.value
             mutableState.value = SplitUiState(
-                uiPreferences = uiPreferences,
+                uiPreferences = mutableState.value.uiPreferences,
                 splitTunnelMode = profile.splitTunnelMode,
                 installedApps = filterApps(
                     showSystemApps = currentState.showSystemApps,
@@ -56,43 +104,7 @@ class SplitViewModel @Inject constructor(
         }
     }
 
-    fun onModeChanged(mode: SplitTunnelMode) {
-        update { copy(splitTunnelMode = mode, message = null) }
-    }
-
-    fun onShowSystemAppsChanged(showSystemApps: Boolean) {
-        update {
-            copy(
-                showSystemApps = showSystemApps,
-                installedApps = filterApps(showSystemApps, appSearchQuery, selectedPackages),
-            )
-        }
-    }
-
-    fun onAppSearchQueryChanged(query: String) {
-        update {
-            copy(
-                appSearchQuery = query,
-                installedApps = filterApps(showSystemApps, query, selectedPackages),
-            )
-        }
-    }
-
-    fun onPackageToggled(packageName: String, selected: Boolean) {
-        update {
-            val updatedPackages = if (selected) {
-                selectedPackages + packageName
-            } else {
-                selectedPackages - packageName
-            }
-            copy(
-                selectedPackages = updatedPackages,
-                installedApps = filterApps(showSystemApps, appSearchQuery, updatedPackages),
-            )
-        }
-    }
-
-    fun save() {
+    private fun save() {
         viewModelScope.launch {
             update { copy(isLoading = true, message = null) }
             runCatching {
@@ -112,30 +124,28 @@ class SplitViewModel @Inject constructor(
                 update {
                     copy(
                         isLoading = false,
-                        shouldClose = true,
                     )
                 }
+                effectChannel.send(SplitUiEffect.NavigateBack)
             }.onFailure { error ->
                 update {
                     copy(
                         isLoading = false,
-                        message = error.message ?: "Failed to save routing settings.",
+                        message = error.message ?: strings().failedSaveRoutingSettings,
                     )
                 }
             }
         }
     }
 
-    fun onMessageConsumed() {
-        update { copy(message = null) }
-    }
-
-    fun onCloseHandled() {
-        update { copy(shouldClose = false) }
-    }
-
     private fun update(transform: SplitUiState.() -> SplitUiState) {
         mutableState.update(transform)
+    }
+
+    private fun emitEffect(effect: SplitUiEffect) {
+        viewModelScope.launch {
+            effectChannel.send(effect)
+        }
     }
 
     private fun filterApps(
@@ -159,4 +169,6 @@ class SplitViewModel @Inject constructor(
             )
             .toList()
     }
+
+    private fun strings() = maydayStrings(uiState.value.uiPreferences.language)
 }

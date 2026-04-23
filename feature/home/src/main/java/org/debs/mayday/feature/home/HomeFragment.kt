@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import android.view.View
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.ComposeView
@@ -17,6 +18,7 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.navigation.fragment.findNavController
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.flow.collectLatest
 import org.debs.mayday.core.designsystem.theme.MaydayTheme
 
 @AndroidEntryPoint
@@ -28,7 +30,7 @@ class HomeFragment : Fragment() {
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
         if (result.resultCode == android.app.Activity.RESULT_OK) {
-            viewModel.startVpn()
+            viewModel.onEvent(HomeUiEvent.StartConfirmed)
         }
     }
 
@@ -49,15 +51,22 @@ class HomeFragment : Fragment() {
                 val state by viewModel.uiState.collectAsState()
                 MaydayTheme(
                     themeMode = state.uiPreferences.themeMode,
+                    language = state.uiPreferences.language,
                     density = state.uiPreferences.density,
                 ) {
+                    LaunchedEffect(Unit) {
+                        viewModel.effect.collectLatest { effect ->
+                            when (effect) {
+                                HomeUiEffect.RequestStartFlow -> requestStartFlow()
+                                HomeUiEffect.NavigateToSettings -> {
+                                    findNavController().navigate(Uri.parse("mayday://settings"))
+                                }
+                            }
+                        }
+                    }
                     HomeScreen(
                         state = state,
-                        onConnectClick = ::requestStartFlow,
-                        onStopClick = viewModel::stopVpn,
-                        onOpenSettingsClick = {
-                            findNavController().navigate(Uri.parse("mayday://settings"))
-                        },
+                        onEvent = viewModel::onEvent,
                     )
                 }
             }
@@ -81,7 +90,7 @@ class HomeFragment : Fragment() {
     private fun launchVpnPermission() {
         val prepareIntent = VpnService.prepare(requireContext())
         if (prepareIntent == null) {
-            viewModel.startVpn()
+            viewModel.onEvent(HomeUiEvent.StartConfirmed)
         } else {
             vpnPermissionLauncher.launch(prepareIntent)
         }

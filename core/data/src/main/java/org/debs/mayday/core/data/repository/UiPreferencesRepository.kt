@@ -1,13 +1,13 @@
 package org.debs.mayday.core.data.repository
 
-import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
 import org.debs.mayday.core.model.AppDensity
 import org.debs.mayday.core.model.AppLanguage
 import org.debs.mayday.core.model.AppThemeMode
 import org.debs.mayday.core.model.UiPreferences
 
 interface UiPreferencesRepository {
-    val preferences: Flow<UiPreferences>
+    val preferences: StateFlow<UiPreferences>
 
     suspend fun setThemeMode(themeMode: AppThemeMode)
 

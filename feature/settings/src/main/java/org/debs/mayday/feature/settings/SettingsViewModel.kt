@@ -3,18 +3,25 @@ package org.debs.mayday.feature.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.debs.mayday.core.data.repository.UiPreferencesRepository
 import org.debs.mayday.core.data.repository.VpnConfigImportParser
 import org.debs.mayday.core.data.repository.VpnProfileRepository
+import org.debs.mayday.core.designsystem.theme.importedServersMessage
+import org.debs.mayday.core.designsystem.theme.maydayStrings
 import org.debs.mayday.core.model.AppDensity
 import org.debs.mayday.core.model.AppLanguage
 import org.debs.mayday.core.model.AppThemeMode
+import org.debs.mayday.core.model.UiPreferences
 import org.debs.mayday.core.model.VpnProfile
 import org.debs.mayday.core.model.VpnServerTarget
 import javax.inject.Inject
@@ -26,18 +33,80 @@ class SettingsViewModel @Inject constructor(
     private val configImportParser: VpnConfigImportParser,
 ) : ViewModel() {
 
-    private val mutableState = MutableStateFlow(SettingsUiState())
+    private val mutableState = MutableStateFlow(
+        SettingsUiState(uiPreferences = uiPreferencesRepository.preferences.value),
+    )
     val uiState: StateFlow<SettingsUiState> = mutableState.asStateFlow()
+    private val effectChannel = Channel<SettingsUiEffect>(Channel.BUFFERED)
+    val effect: Flow<SettingsUiEffect> = effectChannel.receiveAsFlow()
 
     init {
         viewModelScope.launch {
+            uiPreferencesRepository.preferences.collectLatest { preferences ->
+                mutableState.update { it.copy(uiPreferences = preferences) }
+            }
+        }
+        viewModelScope.launch {
             val profile = profileRepository.profile.first()
-            val uiPreferences = uiPreferencesRepository.preferences.first()
-            mutableState.value = profile.toUiState(uiPreferences = uiPreferences)
+            mutableState.value = profile.toUiState(uiPreferences = mutableState.value.uiPreferences)
         }
     }
 
-    fun refreshRoutingSummary() {
+    fun onEvent(event: SettingsUiEvent) {
+        when (event) {
+            SettingsUiEvent.BackClicked -> emitEffect(SettingsUiEffect.NavigateBack)
+            SettingsUiEvent.RefreshRequested -> refreshRoutingSummary()
+            SettingsUiEvent.OpenSplitClicked -> emitEffect(SettingsUiEffect.NavigateToSplit)
+            SettingsUiEvent.SaveClicked -> save()
+            SettingsUiEvent.ImportClicked -> emitEffect(SettingsUiEffect.OpenConfigPicker)
+            SettingsUiEvent.AddServerClicked -> addServer()
+            SettingsUiEvent.MessageShown -> update { copy(message = null) }
+            is SettingsUiEvent.ProfileNameChanged -> update {
+                copy(profileName = event.value, message = null)
+            }
+            is SettingsUiEvent.RelayHostChanged -> update {
+                copy(relayHost = event.value, message = null)
+            }
+            is SettingsUiEvent.RelayPortChanged -> update {
+                copy(relayPort = event.value, message = null)
+            }
+            is SettingsUiEvent.UserIdChanged -> update {
+                copy(userId = event.value, message = null)
+            }
+            is SettingsUiEvent.TunNameChanged -> update {
+                copy(tunName = event.value, message = null)
+            }
+            is SettingsUiEvent.DnsChanged -> update {
+                copy(dnsServers = event.value, message = null)
+            }
+            is SettingsUiEvent.MtuChanged -> update {
+                copy(mtu = event.value, message = null)
+            }
+            is SettingsUiEvent.AutoReconnectChanged -> update {
+                copy(autoReconnect = event.value, message = null)
+            }
+            is SettingsUiEvent.ThemeModeChanged -> setThemeMode(event.value)
+            is SettingsUiEvent.LanguageChanged -> setLanguage(event.value)
+            is SettingsUiEvent.DensityChanged -> setDensity(event.value)
+            is SettingsUiEvent.RemoveServerClicked -> removeServer(event.index)
+            is SettingsUiEvent.ServerIdChanged -> updateServer(event.index) {
+                copy(id = event.value)
+            }
+            is SettingsUiEvent.ServerKeyChanged -> updateServer(event.index) {
+                copy(key = event.value)
+            }
+            is SettingsUiEvent.ServerPriorityChanged -> updateServer(event.index) {
+                copy(priority = event.value)
+            }
+            is SettingsUiEvent.ConfigSelected -> importConfig(
+                rawConfig = event.rawConfig,
+                sourceName = event.sourceName,
+            )
+            is SettingsUiEvent.ImportSelectionFailed -> showMessage(event.message)
+        }
+    }
+
+    private fun refreshRoutingSummary() {
         viewModelScope.launch {
             val latestProfile = profileRepository.profile.first()
             mutableState.update {
@@ -49,49 +118,28 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    fun onProfileNameChanged(value: String) = update { copy(profileName = value, message = null) }
-    fun onRelayHostChanged(value: String) = update { copy(relayHost = value, message = null) }
-    fun onRelayPortChanged(value: String) = update { copy(relayPort = value, message = null) }
-    fun onUserIdChanged(value: String) = update { copy(userId = value, message = null) }
-    fun onTunNameChanged(value: String) = update { copy(tunName = value, message = null) }
-    fun onDnsChanged(value: String) = update { copy(dnsServers = value, message = null) }
-    fun onMtuChanged(value: String) = update { copy(mtu = value, message = null) }
-    fun onAutoReconnectChanged(value: Boolean) = update { copy(autoReconnect = value, message = null) }
-
-    fun onThemeModeChanged(value: AppThemeMode) {
+    private fun setThemeMode(value: AppThemeMode) {
         update { copy(uiPreferences = uiPreferences.copy(themeMode = value)) }
         viewModelScope.launch {
             uiPreferencesRepository.setThemeMode(value)
         }
     }
 
-    fun onLanguageChanged(value: AppLanguage) {
+    private fun setLanguage(value: AppLanguage) {
         update { copy(uiPreferences = uiPreferences.copy(language = value)) }
         viewModelScope.launch {
             uiPreferencesRepository.setLanguage(value)
         }
     }
 
-    fun onDensityChanged(value: AppDensity) {
+    private fun setDensity(value: AppDensity) {
         update { copy(uiPreferences = uiPreferences.copy(density = value)) }
         viewModelScope.launch {
             uiPreferencesRepository.setDensity(value)
         }
     }
 
-    fun onServerIdChanged(index: Int, value: String) {
-        updateServer(index) { copy(id = value) }
-    }
-
-    fun onServerKeyChanged(index: Int, value: String) {
-        updateServer(index) { copy(key = value) }
-    }
-
-    fun onServerPriorityChanged(index: Int, value: String) {
-        updateServer(index) { copy(priority = value) }
-    }
-
-    fun addServer() {
+    private fun addServer() {
         update {
             copy(
                 servers = servers + ServerDraft(priority = (servers.size + 1).toString()),
@@ -100,7 +148,7 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    fun removeServer(index: Int) {
+    private fun removeServer(index: Int) {
         update {
             val updated = servers.toMutableList().also {
                 if (index in it.indices) {
@@ -111,7 +159,7 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    fun importConfig(rawConfig: String, sourceName: String?) {
+    private fun importConfig(rawConfig: String, sourceName: String?) {
         viewModelScope.launch {
             update { copy(isLoading = true, message = null) }
             runCatching {
@@ -125,27 +173,27 @@ class SettingsViewModel @Inject constructor(
                     uiPreferences = uiPreferences,
                     importedConfigName = sourceName,
                 ).copy(
-                    message = "Imported ${profile.servers.size} server(s)",
+                    message = strings().importedServersMessage(profile.servers.size),
                 )
             }.onFailure { error ->
                 update {
                     copy(
                         isLoading = false,
-                        message = error.message ?: "Failed to import config.",
+                        message = error.message ?: strings().failedImportConfig,
                     )
                 }
             }
         }
     }
 
-    fun save() {
+    private fun save() {
         viewModelScope.launch {
             update { copy(isLoading = true, message = null) }
             val currentState = uiState.value
             runCatching {
                 val latestProfile = profileRepository.profile.first()
                 val savedProfile = VpnProfile(
-                    profileName = currentState.profileName.trim().ifEmpty { "Primary" },
+                    profileName = currentState.profileName.trim().ifEmpty { strings().profile },
                     relayHost = currentState.relayHost.trim(),
                     relayPort = currentState.relayPort.toIntOrNull() ?: 443,
                     userId = currentState.userId.trim(),
@@ -161,7 +209,7 @@ class SettingsViewModel @Inject constructor(
                                 priority = draft.priority.toIntOrNull() ?: 1,
                             )
                         }
-                    }.also { require(it.isNotEmpty()) { "At least one server is required." } },
+                    }.also { require(it.isNotEmpty()) { strings().atLeastOneServerRequired } },
                     tunName = currentState.tunName.trim(),
                     dnsServers = currentState.dnsServers
                         .split(',')
@@ -178,26 +226,28 @@ class SettingsViewModel @Inject constructor(
                 update {
                     copy(
                         isLoading = false,
-                        message = "Profile saved",
+                        message = strings().profileSaved,
                     )
                 }
             }.onFailure { error ->
                 update {
                     copy(
                         isLoading = false,
-                        message = error.message ?: "Failed to save profile.",
+                        message = error.message ?: strings().failedSaveProfile,
                     )
                 }
             }
         }
     }
 
-    fun onMessageConsumed() {
-        update { copy(message = null) }
+    private fun showMessage(message: String) {
+        update { copy(message = message, isLoading = false) }
     }
 
-    fun showMessage(message: String) {
-        update { copy(message = message, isLoading = false) }
+    private fun emitEffect(effect: SettingsUiEffect) {
+        viewModelScope.launch {
+            effectChannel.send(effect)
+        }
     }
 
     private fun update(transform: SettingsUiState.() -> SettingsUiState) {
@@ -219,8 +269,10 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    private fun strings() = maydayStrings(uiState.value.uiPreferences.language)
+
     private fun VpnProfile.toUiState(
-        uiPreferences: org.debs.mayday.core.model.UiPreferences,
+        uiPreferences: UiPreferences,
         importedConfigName: String? = null,
     ): SettingsUiState {
         return SettingsUiState(

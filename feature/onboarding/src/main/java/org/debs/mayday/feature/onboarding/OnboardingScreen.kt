@@ -36,10 +36,7 @@ import org.debs.mayday.core.designsystem.theme.maydayStrings
 @Composable
 internal fun OnboardingScreen(
     state: OnboardingUiState,
-    onImportClick: () -> Unit,
-    onManualClick: () -> Unit,
-    onContinueClick: () -> Unit,
-    onMessageConsumed: () -> Unit,
+    onEvent: (OnboardingUiEvent) -> Unit,
 ) {
     val strings = maydayStrings(state.uiPreferences.language)
     val density = LocalMaydayDensity.current
@@ -48,7 +45,7 @@ internal fun OnboardingScreen(
     LaunchedEffect(state.message) {
         val message = state.message ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(message)
-        onMessageConsumed()
+        onEvent(OnboardingUiEvent.MessageShown)
     }
 
     MaydayScreenBackground(modifier = Modifier.fillMaxSize()) {
@@ -96,25 +93,25 @@ internal fun OnboardingScreen(
 
                 OnboardingOptionCard(
                     title = strings.importFile,
-                    subtitle = "client.yaml / client.json",
+                    subtitle = strings.onboardingImportHint,
                     badge = "01",
-                    onClick = onImportClick,
+                    onClick = { onEvent(OnboardingUiEvent.ImportClicked) },
                 )
                 OnboardingOptionCard(
                     title = strings.manual,
-                    subtitle = "relay, user id, servers[]",
+                    subtitle = strings.onboardingManualHint,
                     badge = "02",
-                    onClick = onManualClick,
+                    onClick = { onEvent(OnboardingUiEvent.ManualSetupClicked) },
                 )
                 OnboardingOptionCard(
                     title = strings.continueLabel,
-                    subtitle = "open the dashboard without importing now",
+                    subtitle = strings.onboardingContinueHint,
                     badge = "03",
-                    onClick = onContinueClick,
+                    onClick = { onEvent(OnboardingUiEvent.ContinueClicked) },
                 )
 
                 Text(
-                    text = if (state.isLoading) "Preparing workspace..." else "v1.0.0",
+                    text = if (state.isLoading) strings.preparingWorkspace else "v1.0.0",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier

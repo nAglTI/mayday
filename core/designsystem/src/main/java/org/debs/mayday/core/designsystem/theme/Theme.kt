@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import org.debs.mayday.core.designsystem.R
 import org.debs.mayday.core.model.AppDensity
+import org.debs.mayday.core.model.AppLanguage
 import org.debs.mayday.core.model.AppThemeMode
 
 private val LightColors = lightColorScheme(
@@ -92,94 +93,113 @@ private val MonoFontFamily = FontFamily(
     Font(R.font.jetbrains_mono_medium, weight = FontWeight.Medium),
 )
 
-private val AppTypography = Typography(
-    displayLarge = TextStyle(
-        fontFamily = DisplayFontFamily,
-        fontSize = 48.sp,
-        lineHeight = 50.sp,
-        fontWeight = FontWeight.Medium,
-        letterSpacing = (-0.96).sp,
-    ),
-    displayMedium = TextStyle(
-        fontFamily = DisplayFontFamily,
-        fontSize = 40.sp,
-        lineHeight = 42.sp,
-        fontWeight = FontWeight.Medium,
-        letterSpacing = (-0.8).sp,
-    ),
-    headlineLarge = TextStyle(
-        fontFamily = DisplayFontFamily,
-        fontSize = 34.sp,
-        lineHeight = 36.sp,
-        fontWeight = FontWeight.Medium,
-        letterSpacing = (-0.34).sp,
-    ),
-    headlineMedium = TextStyle(
-        fontFamily = DisplayFontFamily,
-        fontSize = 22.sp,
-        lineHeight = 24.sp,
-        fontWeight = FontWeight.Medium,
-        letterSpacing = (-0.22).sp,
-    ),
-    headlineSmall = TextStyle(
-        fontFamily = DisplayFontFamily,
-        fontSize = 20.sp,
-        lineHeight = 22.sp,
-        fontWeight = FontWeight.Medium,
-        letterSpacing = (-0.2).sp,
-    ),
-    titleLarge = TextStyle(
-        fontFamily = UiFontFamily,
-        fontSize = 15.sp,
-        lineHeight = 20.sp,
-        fontWeight = FontWeight.Medium,
-    ),
-    titleMedium = TextStyle(
-        fontFamily = UiFontFamily,
-        fontSize = 14.sp,
-        lineHeight = 19.sp,
-        fontWeight = FontWeight.Medium,
-    ),
-    titleSmall = TextStyle(
-        fontFamily = UiFontFamily,
-        fontSize = 13.sp,
-        lineHeight = 18.sp,
-        fontWeight = FontWeight.Medium,
-    ),
-    bodyLarge = TextStyle(
-        fontFamily = UiFontFamily,
-        fontSize = 15.sp,
-        lineHeight = 22.sp,
-        fontWeight = FontWeight.Normal,
-    ),
-    bodyMedium = TextStyle(
-        fontFamily = UiFontFamily,
-        fontSize = 14.sp,
-        lineHeight = 20.sp,
-        fontWeight = FontWeight.Normal,
-    ),
-    bodySmall = TextStyle(
-        fontFamily = MonoFontFamily,
-        fontSize = 13.sp,
-        lineHeight = 18.sp,
-        fontWeight = FontWeight.Normal,
-        letterSpacing = 0.sp,
-    ),
-    labelLarge = TextStyle(
-        fontFamily = MonoFontFamily,
-        fontSize = 11.sp,
-        lineHeight = 16.sp,
-        fontWeight = FontWeight.Medium,
-        letterSpacing = 1.1.sp,
-    ),
-    labelMedium = TextStyle(
-        fontFamily = MonoFontFamily,
-        fontSize = 10.sp,
-        lineHeight = 14.sp,
-        fontWeight = FontWeight.Medium,
-        letterSpacing = 1.sp,
-    ),
-)
+private fun appTypography(language: AppLanguage): Typography {
+    val usesCyrillicDisplayFallback = language == AppLanguage.RU
+    val displayFontFamily = if (usesCyrillicDisplayFallback) {
+        FontFamily.Serif
+    } else {
+        DisplayFontFamily
+    }
+    val displayLargeTracking = if (usesCyrillicDisplayFallback) 0.sp else (-0.36).sp
+    val displayMediumTracking = if (usesCyrillicDisplayFallback) 0.sp else (-0.28).sp
+    val headlineLargeTracking = if (usesCyrillicDisplayFallback) 0.sp else (-0.14).sp
+    val headlineMediumTracking = if (usesCyrillicDisplayFallback) 0.sp else (-0.08).sp
+    val headlineSmallTracking = if (usesCyrillicDisplayFallback) 0.sp else (-0.04).sp
+
+    return Typography(
+        displayLarge = TextStyle(
+            fontFamily = displayFontFamily,
+            fontSize = 48.sp,
+            lineHeight = 52.sp,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = displayLargeTracking,
+        ),
+        displayMedium = TextStyle(
+            fontFamily = displayFontFamily,
+            fontSize = 40.sp,
+            lineHeight = 44.sp,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = displayMediumTracking,
+        ),
+        headlineLarge = TextStyle(
+            fontFamily = displayFontFamily,
+            fontSize = 34.sp,
+            lineHeight = 38.sp,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = headlineLargeTracking,
+        ),
+        headlineMedium = TextStyle(
+            fontFamily = displayFontFamily,
+            fontSize = 22.sp,
+            lineHeight = 27.sp,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = headlineMediumTracking,
+        ),
+        headlineSmall = TextStyle(
+            fontFamily = displayFontFamily,
+            fontSize = 20.sp,
+            lineHeight = 25.sp,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = headlineSmallTracking,
+        ),
+        titleLarge = TextStyle(
+            fontFamily = UiFontFamily,
+            fontSize = 15.sp,
+            lineHeight = 20.sp,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = 0.sp,
+        ),
+        titleMedium = TextStyle(
+            fontFamily = UiFontFamily,
+            fontSize = 14.sp,
+            lineHeight = 19.sp,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = 0.sp,
+        ),
+        titleSmall = TextStyle(
+            fontFamily = UiFontFamily,
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = 0.sp,
+        ),
+        bodyLarge = TextStyle(
+            fontFamily = UiFontFamily,
+            fontSize = 15.sp,
+            lineHeight = 22.sp,
+            fontWeight = FontWeight.Normal,
+            letterSpacing = 0.sp,
+        ),
+        bodyMedium = TextStyle(
+            fontFamily = UiFontFamily,
+            fontSize = 14.sp,
+            lineHeight = 20.sp,
+            fontWeight = FontWeight.Normal,
+            letterSpacing = 0.sp,
+        ),
+        bodySmall = TextStyle(
+            fontFamily = MonoFontFamily,
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+            fontWeight = FontWeight.Normal,
+            letterSpacing = 0.sp,
+        ),
+        labelLarge = TextStyle(
+            fontFamily = MonoFontFamily,
+            fontSize = 11.sp,
+            lineHeight = 16.sp,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = 0.72.sp,
+        ),
+        labelMedium = TextStyle(
+            fontFamily = MonoFontFamily,
+            fontSize = 10.sp,
+            lineHeight = 14.sp,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = 0.64.sp,
+        ),
+    )
+}
 
 private val AppShapes = Shapes(
     small = RoundedCornerShape(6.dp),
@@ -191,6 +211,7 @@ private val AppShapes = Shapes(
 @Composable
 fun MaydayTheme(
     themeMode: AppThemeMode = AppThemeMode.DARK,
+    language: AppLanguage = AppLanguage.EN,
     density: AppDensity = AppDensity.COMFORTABLE,
     content: @Composable () -> Unit,
 ) {
@@ -218,7 +239,7 @@ fun MaydayTheme(
     ) {
         MaterialTheme(
             colorScheme = colors,
-            typography = AppTypography,
+            typography = appTypography(language),
             shapes = AppShapes,
             content = content,
         )

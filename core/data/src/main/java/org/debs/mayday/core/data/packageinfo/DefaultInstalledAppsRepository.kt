@@ -18,6 +18,7 @@ class DefaultInstalledAppsRepository @Inject constructor(
 
     override suspend fun getInstalledApps(): List<InstalledApp> = withContext(Dispatchers.IO) {
         val packageManager = context.packageManager
+        val appPackageName = context.packageName
         val applications = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             packageManager.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0))
         } else {
@@ -27,6 +28,7 @@ class DefaultInstalledAppsRepository @Inject constructor(
 
         applications
             .asSequence()
+            .filter { it.packageName != appPackageName }
             .filter { packageManager.getLaunchIntentForPackage(it.packageName) != null }
             .map { appInfo ->
                 InstalledApp(
