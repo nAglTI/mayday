@@ -81,6 +81,7 @@ data class MaydayStrings(
     val failedImportSelectedFile: String,
     val failedImportConfig: String,
     val atLeastOneServerRequired: String,
+    val atLeastOneAppRequired: String = "Select at least one app.",
     val profileSaved: String,
     val failedSaveProfile: String,
     val failedSaveRoutingSettings: String,
@@ -288,9 +289,9 @@ fun MaydayStrings.importedConfigMessage(sourceName: String): String {
 private fun russianServers(count: Int): String {
     val mod10 = count % 10
     val mod100 = count % 100
-    return when {
-        mod10 == 1 && mod100 != 11 -> "сервер"
-        mod10 in 2..4 && mod100 !in 12..14 -> "сервера"
+    return when (mod10) {
+        1 if mod100 != 11 -> "сервер"
+        in 2..4 if mod100 !in 12..14 -> "сервера"
         else -> "серверов"
     }
 }

@@ -26,7 +26,7 @@ import javax.inject.Singleton
 @Singleton
 class DefaultVpnProfileRepository @Inject constructor(
     private val dataStore: DataStore<Preferences>,
-    @ApplicationContext private val context: Context,
+    @param:ApplicationContext private val context: Context,
 ) : VpnProfileRepository {
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 

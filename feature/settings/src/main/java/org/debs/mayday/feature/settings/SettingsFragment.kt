@@ -20,6 +20,7 @@ import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.flow.collectLatest
 import org.debs.mayday.core.designsystem.theme.MaydayTheme
 import org.debs.mayday.core.designsystem.theme.maydayStrings
+import androidx.core.net.toUri
 
 @AndroidEntryPoint
 class SettingsFragment : Fragment() {
@@ -87,7 +88,7 @@ class SettingsFragment : Fragment() {
                             when (effect) {
                                 SettingsUiEffect.NavigateBack -> findNavController().popBackStack()
                                 SettingsUiEffect.NavigateToSplit -> {
-                                    findNavController().navigate(Uri.parse("mayday://split"))
+                                    findNavController().navigate("mayday://split".toUri())
                                 }
                                 SettingsUiEffect.OpenConfigPicker -> {
                                     importConfigLauncher.launch(arrayOf("*/*"))

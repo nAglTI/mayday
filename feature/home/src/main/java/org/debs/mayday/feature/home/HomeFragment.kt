@@ -2,7 +2,6 @@ package org.debs.mayday.feature.home
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
@@ -14,6 +13,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.navigation.fragment.findNavController
@@ -59,7 +59,7 @@ class HomeFragment : Fragment() {
                             when (effect) {
                                 HomeUiEffect.RequestStartFlow -> requestStartFlow()
                                 HomeUiEffect.NavigateToSettings -> {
-                                    findNavController().navigate(Uri.parse("mayday://settings"))
+                                    findNavController().navigate("mayday://settings".toUri())
                                 }
                             }
                         }

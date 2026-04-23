@@ -13,7 +13,7 @@ import javax.inject.Singleton
 
 @Singleton
 class DefaultInstalledAppsRepository @Inject constructor(
-    @ApplicationContext private val context: Context,
+    @param:ApplicationContext private val context: Context,
 ) : InstalledAppsRepository {
 
     override suspend fun getInstalledApps(): List<InstalledApp> = withContext(Dispatchers.IO) {

@@ -1,10 +1,12 @@
 package org.debs.mayday.core.vpn.service
 
+import android.annotation.SuppressLint
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.VpnService
 import android.os.Handler
@@ -14,6 +16,7 @@ import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.system.OsConstants
 import android.util.Log
+import androidx.core.app.ServiceCompat
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +41,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import javax.inject.Inject
 
+@SuppressLint("VpnServicePolicy")
 @AndroidEntryPoint
 class VpnCoreService : VpnService() {
 
@@ -76,9 +80,11 @@ class VpnCoreService : VpnService() {
 
     private fun startVpn() {
         notificationFactory.ensureChannel()
-        startForeground(
+        ServiceCompat.startForeground(
+            this,
             VpnNotificationFactory.NOTIFICATION_ID,
             notificationFactory.create(stateStore.state.value),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED,
         )
 
         serviceScope.launch {
@@ -249,12 +255,10 @@ class VpnCoreService : VpnService() {
         }.getOrElse { error ->
             return when (error) {
                 is SecurityException -> {
-                    // Сервис не является активным VpnService для текущего пользователя
                     emptyList()
                 }
 
                 is IllegalArgumentException -> {
-                    // Неподдерживаемый protocol
                     emptyList()
                 }
 

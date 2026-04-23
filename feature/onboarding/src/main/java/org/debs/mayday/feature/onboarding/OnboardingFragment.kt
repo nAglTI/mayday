@@ -19,6 +19,7 @@ import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.flow.collectLatest
 import org.debs.mayday.core.designsystem.theme.MaydayTheme
 import org.debs.mayday.core.designsystem.theme.maydayStrings
+import androidx.core.net.toUri
 
 @AndroidEntryPoint
 class OnboardingFragment : Fragment() {
@@ -84,7 +85,7 @@ class OnboardingFragment : Fragment() {
                                 }
                                 OnboardingUiEffect.NavigateHome -> {
                                     findNavController().navigate(
-                                        Uri.parse("mayday://home"),
+                                        "mayday://home".toUri(),
                                         NavOptions.Builder()
                                             .setPopUpTo(
                                                 findNavController().graph.startDestinationId,
@@ -95,7 +96,7 @@ class OnboardingFragment : Fragment() {
                                 }
                                 OnboardingUiEffect.NavigateToSettings -> {
                                     findNavController().navigate(
-                                        Uri.parse("mayday://settings"),
+                                        "mayday://settings".toUri(),
                                         NavOptions.Builder()
                                             .setPopUpTo(
                                                 findNavController().graph.startDestinationId,

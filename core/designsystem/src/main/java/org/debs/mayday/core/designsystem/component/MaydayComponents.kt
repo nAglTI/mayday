@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -32,11 +31,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.luminance
@@ -303,6 +303,7 @@ fun MaydayActionButton(
     } else {
         colors.onSurface
     }
+    val interactionSource = remember { MutableInteractionSource() }
     Surface(
         modifier = modifier
             .heightIn(min = 52.dp)
@@ -310,7 +311,7 @@ fun MaydayActionButton(
             .clip(CircleShape)
             .clickable(
                 enabled = enabled,
-                interactionSource = MutableInteractionSource(),
+                interactionSource = interactionSource,
                 indication = null,
                 onClick = onClick,
             ),
@@ -364,6 +365,7 @@ fun <T> MaydaySegmentedControl(
         ) {
             items.forEachIndexed { index, (value, title) ->
                 val selectedItem = value == selected
+                val interactionSource = remember(value) { MutableInteractionSource() }
                 val segmentModifier = if (equalWidth) {
                     Modifier.weight(1f)
                 } else {
@@ -374,7 +376,7 @@ fun <T> MaydaySegmentedControl(
                         .fillMaxHeight()
                         .clip(MaterialTheme.shapes.small)
                         .clickable(
-                            interactionSource = MutableInteractionSource(),
+                            interactionSource = interactionSource,
                             indication = null,
                             onClick = { onSelect(value) },
                         ),
@@ -471,13 +473,14 @@ fun MaydayToggle(
         targetValue = if (checked) 16.dp else 0.dp,
         label = "maydayToggleOffset",
     )
+    val interactionSource = remember { MutableInteractionSource() }
     Surface(
         modifier = modifier
             .width(44.dp)
             .height(28.dp)
             .clip(CircleShape)
             .clickable(
-                interactionSource = MutableInteractionSource(),
+                interactionSource = interactionSource,
                 indication = null,
                 onClick = { onCheckedChange(!checked) },
             ),
@@ -516,11 +519,12 @@ fun MaydayChoiceChip(
     modifier: Modifier = Modifier,
 ) {
     val colors = MaterialTheme.colorScheme
+    val interactionSource = remember { MutableInteractionSource() }
     Surface(
         modifier = modifier
             .clip(MaterialTheme.shapes.small)
             .clickable(
-                interactionSource = MutableInteractionSource(),
+                interactionSource = interactionSource,
                 indication = null,
                 onClick = onClick,
             ),
@@ -544,12 +548,13 @@ fun MaydayIconButton(
     modifier: Modifier = Modifier,
     monospace: Boolean = false,
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
     Surface(
         modifier = modifier
             .size(36.dp)
             .clip(MaterialTheme.shapes.medium)
             .clickable(
-                interactionSource = MutableInteractionSource(),
+                interactionSource = interactionSource,
                 indication = null,
                 onClick = onClick,
             ),
