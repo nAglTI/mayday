@@ -7,7 +7,7 @@ plugins {
 }
 
 android {
-    namespace = "org.debs.kalpn.core.gomobile"
+    namespace = "org.debs.mayday.core.gomobile"
     compileSdk = 36
 
     defaultConfig {

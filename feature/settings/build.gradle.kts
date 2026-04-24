@@ -8,7 +8,7 @@ plugins {
 }
 
 android {
-    namespace = "org.debs.kalpn.feature.settings"
+    namespace = "org.debs.mayday.feature.settings"
     compileSdk = 36
 
     defaultConfig {
@@ -45,6 +45,7 @@ dependencies {
     implementation(libs.androidx.fragment)
     implementation(libs.androidx.lifecycle.runtime)
     implementation(libs.androidx.lifecycle.viewmodel)
+    implementation(libs.androidx.navigation.fragment)
     implementation(libs.hilt.android)
 
     debugImplementation(libs.androidx.compose.ui.tooling)

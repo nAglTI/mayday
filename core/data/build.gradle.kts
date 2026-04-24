@@ -7,7 +7,7 @@ plugins {
 }
 
 android {
-    namespace = "org.debs.kalpn.core.data"
+    namespace = "org.debs.mayday.core.data"
     compileSdk = 36
 
     defaultConfig {

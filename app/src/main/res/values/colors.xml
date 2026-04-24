@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="kalpn_primary">#EA580C</color>
-    <color name="kalpn_primary_dark">#C2410C</color>
-    <color name="kalpn_surface">#FFF8FAFC</color>
-    <color name="kalpn_on_surface">#FF111827</color>
-    <color name="kalpn_on_surface_variant">#FF475569</color>
-    <color name="kalpn_nav_unselected">#7B8794</color>
+    <color name="mayday_primary">#2F6A4B</color>
+    <color name="mayday_primary_dark">#DFEAD9</color>
+    <color name="mayday_background">#F5F3EF</color>
+    <color name="mayday_surface">#FFFFFF</color>
+    <color name="mayday_on_surface">#14110C</color>
+    <color name="mayday_on_surface_variant">#6B6558</color>
+    <color name="mayday_nav_unselected">#8A8575</color>
 </resources>

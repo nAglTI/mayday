@@ -18,7 +18,9 @@
             <option value="$PROJECT_DIR$/core/vpn-runtime" />
             <option value="$PROJECT_DIR$/feature" />
             <option value="$PROJECT_DIR$/feature/home" />
+            <option value="$PROJECT_DIR$/feature/onboarding" />
             <option value="$PROJECT_DIR$/feature/settings" />
+            <option value="$PROJECT_DIR$/feature/split" />
           </set>
         </option>
       </GradleProjectSettings>
