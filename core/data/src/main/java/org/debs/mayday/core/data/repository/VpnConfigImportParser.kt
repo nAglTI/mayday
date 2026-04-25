@@ -2,6 +2,7 @@ package org.debs.mayday.core.data.repository
 
 import org.debs.mayday.core.model.SplitTunnelMode
 import org.debs.mayday.core.model.VpnProfile
+import org.debs.mayday.core.model.VpnRelayTarget
 import org.debs.mayday.core.model.VpnServerTarget
 import org.json.JSONArray
 import org.json.JSONObject
@@ -27,6 +28,7 @@ class VpnConfigImportParser @Inject constructor() {
         val json = JSONObject(rawConfig)
         return profileFromMap(
             profileName = currentProfileName,
+            relays = json.optJSONArray("relays"),
             relay = json.optString("relay"),
             userId = json.opt("user_id")?.toString().orEmpty(),
             tunName = json.optString("tun_name"),
@@ -40,6 +42,17 @@ class VpnConfigImportParser @Inject constructor() {
         val yaml = Yaml().load<Any?>(rawConfig)
         require(yaml is Map<*, *>) { "Unsupported YAML structure." }
 
+        val relays = JSONArray()
+        (yaml["relays"] as? List<*>)?.forEachIndexed { index, item ->
+            if (item is Map<*, *>) {
+                relays.put(
+                    JSONObject()
+                        .put("id", item["id"]?.toString().orEmpty().ifBlank { "relay-${index + 1}" })
+                        .put("addr", item["addr"]?.toString().orEmpty())
+                        .put("short_id", item["short_id"]?.toString()?.toIntOrNull() ?: (index + 1)),
+                )
+            }
+        }
         val relay = yaml["relay"]?.toString().orEmpty()
         val userId = yaml["user_id"]?.toString().orEmpty()
         val tunName = yaml["tun_name"]?.toString().orEmpty()
@@ -67,6 +80,7 @@ class VpnConfigImportParser @Inject constructor() {
 
         return profileFromMap(
             profileName = currentProfileName,
+            relays = relays,
             relay = relay,
             userId = userId,
             tunName = tunName,
@@ -78,6 +92,7 @@ class VpnConfigImportParser @Inject constructor() {
 
     private fun profileFromMap(
         profileName: String,
+        relays: JSONArray?,
         relay: String,
         userId: String,
         tunName: String,
@@ -85,14 +100,10 @@ class VpnConfigImportParser @Inject constructor() {
         servers: JSONArray,
         splitTunnel: JSONObject?,
     ): VpnProfile {
-        require(relay.isNotBlank()) { "relay is required." }
         require(userId.isNotBlank()) { "user_id is required." }
         require(userId.toLongOrNull() != null) { "user_id must be an integer." }
-        val relayHost = relay.substringBefore(':')
-        val relayPort = relay.substringAfter(':', "443").toIntOrNull()
-            ?.takeIf { it in 1..65535 }
-            ?: 443
-        require(relayHost.isNotBlank()) { "relay host is required." }
+        val importedRelays = parseRelays(relays, relay)
+        require(importedRelays.isNotEmpty()) { "relays[] must contain at least one relay." }
         val importedServers = buildList {
             for (index in 0 until servers.length()) {
                 val item = servers.getJSONObject(index)
@@ -125,8 +136,7 @@ class VpnConfigImportParser @Inject constructor() {
 
         return VpnProfile(
             profileName = profileName,
-            relayHost = relayHost,
-            relayPort = relayPort,
+            relays = importedRelays,
             userId = userId,
             servers = importedServers,
             tunName = tunName,
@@ -139,6 +149,42 @@ class VpnConfigImportParser @Inject constructor() {
                 SplitTunnelMode.DISABLED
             },
             selectedPackages = selectedPackages,
+        )
+    }
+
+    private fun parseRelays(relays: JSONArray?, legacyRelay: String): List<VpnRelayTarget> {
+        val importedRelays = buildList {
+            val array = relays ?: JSONArray()
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                val addr = item.optString("addr").trim()
+                if (addr.isBlank()) {
+                    continue
+                }
+                add(
+                    VpnRelayTarget(
+                        id = item.optString("id").trim().ifBlank { "relay-${index + 1}" },
+                        addr = addr,
+                        shortId = item.optInt("short_id", index + 1).coerceAtLeast(1),
+                    ),
+                )
+            }
+        }
+        if (importedRelays.isNotEmpty()) {
+            return importedRelays
+        }
+
+        val normalizedRelay = legacyRelay.trim()
+        if (normalizedRelay.isBlank()) {
+            return emptyList()
+        }
+
+        return listOf(
+            VpnRelayTarget(
+                id = "relay-1",
+                addr = normalizedRelay,
+                shortId = 1,
+            ),
         )
     }
 }

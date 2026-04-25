@@ -23,6 +23,7 @@ import org.debs.mayday.core.model.AppLanguage
 import org.debs.mayday.core.model.AppThemeMode
 import org.debs.mayday.core.model.UiPreferences
 import org.debs.mayday.core.model.VpnProfile
+import org.debs.mayday.core.model.VpnRelayTarget
 import org.debs.mayday.core.model.VpnServerTarget
 import javax.inject.Inject
 
@@ -59,16 +60,11 @@ class SettingsViewModel @Inject constructor(
             SettingsUiEvent.OpenSplitClicked -> emitEffect(SettingsUiEffect.NavigateToSplit)
             SettingsUiEvent.SaveClicked -> save()
             SettingsUiEvent.ImportClicked -> emitEffect(SettingsUiEffect.OpenConfigPicker)
+            SettingsUiEvent.AddRelayClicked -> addRelay()
             SettingsUiEvent.AddServerClicked -> addServer()
             SettingsUiEvent.MessageShown -> update { copy(message = null) }
             is SettingsUiEvent.ProfileNameChanged -> update {
                 copy(profileName = event.value, message = null)
-            }
-            is SettingsUiEvent.RelayHostChanged -> update {
-                copy(relayHost = event.value, message = null)
-            }
-            is SettingsUiEvent.RelayPortChanged -> update {
-                copy(relayPort = event.value, message = null)
             }
             is SettingsUiEvent.UserIdChanged -> update {
                 copy(userId = event.value, message = null)
@@ -88,7 +84,17 @@ class SettingsViewModel @Inject constructor(
             is SettingsUiEvent.ThemeModeChanged -> setThemeMode(event.value)
             is SettingsUiEvent.LanguageChanged -> setLanguage(event.value)
             is SettingsUiEvent.DensityChanged -> setDensity(event.value)
+            is SettingsUiEvent.RemoveRelayClicked -> removeRelay(event.index)
             is SettingsUiEvent.RemoveServerClicked -> removeServer(event.index)
+            is SettingsUiEvent.RelayIdChanged -> updateRelay(event.index) {
+                copy(id = event.value)
+            }
+            is SettingsUiEvent.RelayAddressChanged -> updateRelay(event.index) {
+                copy(addr = event.value)
+            }
+            is SettingsUiEvent.RelayShortIdChanged -> updateRelay(event.index) {
+                copy(shortId = event.value)
+            }
             is SettingsUiEvent.ServerIdChanged -> updateServer(event.index) {
                 copy(id = event.value)
             }
@@ -139,12 +145,32 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    private fun addRelay() {
+        update {
+            copy(
+                relays = relays + RelayDraft(shortId = (relays.size + 1).toString()),
+                message = null,
+            )
+        }
+    }
+
     private fun addServer() {
         update {
             copy(
                 servers = servers + ServerDraft(priority = (servers.size + 1).toString()),
                 message = null,
             )
+        }
+    }
+
+    private fun removeRelay(index: Int) {
+        update {
+            val updated = relays.toMutableList().also {
+                if (index in it.indices) {
+                    it.removeAt(index)
+                }
+            }.ifEmpty { mutableListOf(RelayDraft()) }
+            copy(relays = updated, message = null)
         }
     }
 
@@ -194,8 +220,18 @@ class SettingsViewModel @Inject constructor(
                 val latestProfile = profileRepository.profile.first()
                 val savedProfile = VpnProfile(
                     profileName = currentState.profileName.trim().ifEmpty { strings().profile },
-                    relayHost = currentState.relayHost.trim(),
-                    relayPort = currentState.relayPort.toIntOrNull() ?: 443,
+                    relays = currentState.relays.mapIndexedNotNull { index, draft ->
+                        val addr = draft.addr.trim()
+                        if (addr.isBlank()) {
+                            null
+                        } else {
+                            VpnRelayTarget(
+                                id = draft.id.trim().ifBlank { "relay-${index + 1}" },
+                                addr = addr,
+                                shortId = draft.shortId.toIntOrNull()?.coerceAtLeast(1) ?: (index + 1),
+                            )
+                        }
+                    }.also { require(it.isNotEmpty()) { "At least one relay is required." } },
                     userId = currentState.userId.trim(),
                     servers = currentState.servers.mapNotNull { draft ->
                         val id = draft.id.trim()
@@ -254,6 +290,21 @@ class SettingsViewModel @Inject constructor(
         mutableState.update(transform)
     }
 
+    private fun updateRelay(index: Int, transform: RelayDraft.() -> RelayDraft) {
+        update {
+            copy(
+                relays = relays.mapIndexed { currentIndex, relay ->
+                    if (currentIndex == index) {
+                        relay.transform()
+                    } else {
+                        relay
+                    }
+                },
+                message = null,
+            )
+        }
+    }
+
     private fun updateServer(index: Int, transform: ServerDraft.() -> ServerDraft) {
         update {
             copy(
@@ -278,8 +329,13 @@ class SettingsViewModel @Inject constructor(
         return SettingsUiState(
             uiPreferences = uiPreferences,
             profileName = profileName,
-            relayHost = relayHost,
-            relayPort = relayPort.toString(),
+            relays = relays.map {
+                RelayDraft(
+                    id = it.id,
+                    addr = it.addr,
+                    shortId = it.shortId.toString(),
+                )
+            }.ifEmpty { listOf(RelayDraft()) },
             userId = userId,
             servers = servers.map {
                 ServerDraft(

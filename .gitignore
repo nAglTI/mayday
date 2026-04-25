@@ -13,4 +13,6 @@ local.properties
 /goAndroidBuild/
 /design/
 **/build/
+**/release/
+/.kekes
 /.kotlin

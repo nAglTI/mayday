@@ -2,8 +2,7 @@ package org.debs.mayday.core.model
 
 data class VpnProfile(
     val profileName: String = "Primary",
-    val relayHost: String = "",
-    val relayPort: Int = 443,
+    val relays: List<VpnRelayTarget> = emptyList(),
     val userId: String = "",
     val servers: List<VpnServerTarget> = emptyList(),
     val tunName: String = "",
@@ -14,13 +13,18 @@ data class VpnProfile(
     val isAutoReconnectEnabled: Boolean = true,
 ) {
     fun endpointSummary(): String {
-        if (relayHost.isBlank()) {
+        val primaryRelay = relays.firstOrNull() ?: return "Relay not configured"
+        if (primaryRelay.addr.isBlank()) {
             return "Relay not configured"
         }
+
         return buildString {
-            append(relayHost)
-            append(':')
-            append(relayPort)
+            append(primaryRelay.addr)
+            if (relays.size > 1) {
+                append(" (")
+                append(relays.size)
+                append(" relays)")
+            }
             if (servers.isNotEmpty()) {
                 append(" -> ")
                 append(servers.first().id)

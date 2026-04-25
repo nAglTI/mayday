@@ -2,19 +2,20 @@ package org.debs.mayday.core.vpn.service
 
 import android.annotation.SuppressLint
 import android.app.NotificationManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.os.Build
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.VpnService
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.os.ParcelFileDescriptor
-import android.os.Process
-import android.system.OsConstants
 import android.util.Log
 import androidx.core.app.ServiceCompat
 import dagger.hilt.android.AndroidEntryPoint
@@ -25,6 +26,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.debs.mayday.core.data.repository.VpnProfileRepository
 import org.debs.mayday.core.gomobile.bridge.VpnCoreBridge
 import org.debs.mayday.core.gomobile.bridge.VpnCoreConfigEncoder
@@ -35,10 +38,6 @@ import org.debs.mayday.core.model.VpnProfile
 import org.debs.mayday.core.model.VpnRuntimeState
 import org.debs.mayday.core.vpn.controller.VpnConnectionStateStore
 import org.debs.mayday.core.vpn.notification.VpnNotificationFactory
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import java.net.InetAddress
-import java.net.InetSocketAddress
 import javax.inject.Inject
 
 @SuppressLint("VpnServicePolicy")
@@ -54,8 +53,38 @@ class VpnCoreService : VpnService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
     private val lifecycleMutex = Mutex()
+    private val connectivityManager: ConnectivityManager by lazy {
+        getSystemService(ConnectivityManager::class.java)
+    }
+    private val packageResolver by lazy {
+        AndroidPackageResolver(
+            connectivityManager = connectivityManager,
+            packageManager = packageManager,
+        )
+    }
+    private val packageBroadcastReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val packageName = intent?.data?.schemeSpecificPart?.trim().orEmpty()
+            if (packageName.isBlank()) {
+                return
+            }
+            onPackageChanged(packageName)
+        }
+    }
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            vpnCoreBridge.onNetworkChange()
+        }
+
+        override fun onLost(network: Network) {
+            vpnCoreBridge.onNetworkChange()
+        }
+    }
+
     private var reconfigThread: HandlerThread? = null
     private var reconfigHandler: Handler? = null
+    private var isPackageReceiverRegistered = false
+    private var isNetworkCallbackRegistered = false
     @Volatile private var activeProfile: VpnProfile? = null
     private var currentProfileSummary: String = "No profile selected"
     @Volatile private var isStarting = false
@@ -63,6 +92,12 @@ class VpnCoreService : VpnService() {
     @Volatile private var isStopRequested = false
     @Volatile private var assignedIp: String? = null
     @Volatile private var pendingAssignedIp: String? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        registerPackageReceiver()
+        registerNetworkCallback()
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         return when (intent?.action) {
@@ -84,7 +119,7 @@ class VpnCoreService : VpnService() {
             this,
             VpnNotificationFactory.NOTIFICATION_ID,
             notificationFactory.create(stateStore.state.value),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED,
+            foregroundServiceType(),
         )
 
         serviceScope.launch {
@@ -93,6 +128,7 @@ class VpnCoreService : VpnService() {
                     Log.d(TAG, "Ignoring duplicate start request.")
                     return@withLock
                 }
+
                 val profile = profileRepository.profile.first()
                 ensureReconfigWorker()
                 isStopRequested = false
@@ -177,6 +213,9 @@ class VpnCoreService : VpnService() {
                 tunReconfigurator = { assignedIp, maskBits ->
                     onAssignedIp(assignedIp, maskBits.toInt())
                 },
+                packageResolver = packageResolver.takeIf {
+                    profile.splitTunnelMode != SplitTunnelMode.DISABLED
+                }
             ),
         )
 
@@ -185,6 +224,7 @@ class VpnCoreService : VpnService() {
                 Log.d(TAG, "Late start completion ignored during shutdown.")
                 return@onSuccess
             }
+
             isStarting = false
             isVpnActive = true
             publishState(
@@ -217,79 +257,6 @@ class VpnCoreService : VpnService() {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
-    }
-
-    private val connectivityManager: ConnectivityManager by lazy {
-        getSystemService(ConnectivityManager::class.java)
-    }
-
-    /**
-     * Возвращает пакеты-владельцы соединения по 5-tuple.
-     *
-     * srcIp/srcPort/dstIp/dstPort можно передавать прямо из распарсенного IP-пакета.
-     * Для надежности пробуем и прямое направление, и обратное — это полезно,
-     * если в TUN приходят как исходящие, так и входящие пакеты.
-     */
-    private fun resolveOwnerPackages(
-        protocol: Int = OsConstants.IPPROTO_TCP,
-        srcIp: InetAddress,
-        srcPort: Int,
-        dstIp: InetAddress,
-        dstPort: Int
-    ): List<String> {
-        require(
-            protocol == OsConstants.IPPROTO_TCP || protocol == OsConstants.IPPROTO_UDP
-        ) {
-            "Unsupported protocol: $protocol. Only TCP/UDP are supported."
-        }
-
-        val forwardLocal = InetSocketAddress(srcIp, srcPort)
-        val forwardRemote = InetSocketAddress(dstIp, dstPort)
-
-        val uidForward = runCatching {
-            connectivityManager.getConnectionOwnerUid(
-                protocol,
-                forwardLocal,
-                forwardRemote
-            )
-        }.getOrElse { error ->
-            return when (error) {
-                is SecurityException -> {
-                    emptyList()
-                }
-
-                is IllegalArgumentException -> {
-                    emptyList()
-                }
-
-                else -> emptyList()
-            }
-        }
-
-        return if (uidForward != Process.INVALID_UID) {
-            packageManager.getPackagesForUid(uidForward)?.toList().orEmpty()
-        } else emptyList()
-
-        // Fallback: пробуем обратное направление.
-//        val reverseLocal = InetSocketAddress(dstIp, dstPort)
-//        val reverseRemote = InetSocketAddress(srcIp, srcPort)
-//
-//        val uidReverse = runCatching {
-//            connectivityManager.getConnectionOwnerUid(
-//                protocol,
-//                reverseLocal,
-//                reverseRemote
-//            )
-//        }.getOrElse {
-//            return emptyList()
-//        }
-//
-//        if (uidReverse == Process.INVALID_UID) {
-//            // flow не найден или не относится к вашему VPN
-//            return emptyList()
-//        }
-//
-//        return packageManager.getPackagesForUid(uidReverse)?.toList().orEmpty()
     }
 
     private fun buildTun(
@@ -369,7 +336,8 @@ class VpnCoreService : VpnService() {
                         VpnRuntimeState(
                             status = VpnConnectionStatus.Error,
                             headline = "TUN hot-swap failed",
-                            detail = error.message ?: "Unable to rebuild the interface for the refreshed address.",
+                            detail = error.message
+                                ?: "Unable to rebuild the interface for the refreshed address.",
                             engineAvailable = vpnCoreBridge.isLinked,
                             activeProfileSummary = currentProfileSummary,
                             engineDiagnostics = vpnCoreBridge.linkErrorMessage,
@@ -398,13 +366,14 @@ class VpnCoreService : VpnService() {
                             pendingAssignedIp = null
                             return@onSuccess
                         }
+
                         assignedIp = ip
                         pendingAssignedIp = null
                         publishState(
                             VpnRuntimeState(
                                 status = VpnConnectionStatus.Running,
                                 headline = "VPN tunnel active",
-                                detail = "TUN hot-swapped to $ip/${SWAPPED_PREFIX}. Relay session was preserved.",
+                                detail = "TUN hot-swapped to $ip/$SWAPPED_PREFIX. Relay session was preserved.",
                                 engineAvailable = vpnCoreBridge.isLinked,
                                 activeProfileSummary = currentProfileSummary,
                                 engineDiagnostics = vpnCoreBridge.linkErrorMessage,
@@ -419,12 +388,14 @@ class VpnCoreService : VpnService() {
                         if (isStopRequested) {
                             return@onFailure
                         }
+
                         shouldStop = true
                         publishState(
                             VpnRuntimeState(
                                 status = VpnConnectionStatus.Error,
                                 headline = "TUN hot-swap failed",
-                                detail = error.message ?: "runner.swapTun() failed for AssignedIP $ip/$maskBits.",
+                                detail = error.message
+                                    ?: "runner.swapTun() failed for AssignedIP $ip/$maskBits.",
                                 engineAvailable = vpnCoreBridge.isLinked,
                                 activeProfileSummary = currentProfileSummary,
                                 engineDiagnostics = vpnCoreBridge.linkErrorMessage,
@@ -441,42 +412,46 @@ class VpnCoreService : VpnService() {
 
     private fun Builder.applySplitTunnel(profile: VpnProfile): Builder {
         val splitMode = profile.splitTunnelMode
-        if (splitMode == SplitTunnelMode.DISABLED) {
-            return this
-        }
-
         val selectedPackages = profile.selectedPackages
             .asSequence()
             .map(String::trim)
             .filter(String::isNotBlank)
+            .filterNot { it == packageName }
             .distinct()
             .toList()
 
-        if (splitMode == SplitTunnelMode.EXCLUDE_SELECTED && selectedPackages.isEmpty()) {
-            return this
-        }
+        val useAllowedApplications = splitMode == SplitTunnelMode.ONLY_SELECTED
 
-        val useAllowedApplications = splitMode == SplitTunnelMode.ONLY_SELECTED && selectedPackages.isNotEmpty()
-        val routingPackages = when {
-            selectedPackages.isNotEmpty() -> selectedPackages
-            splitMode == SplitTunnelMode.ONLY_SELECTED -> resolveInstalledPackageNames()
-            else -> emptyList()
-        }
-
-        require(routingPackages.isNotEmpty()) {
-            "Unable to resolve installed applications for app routing."
+        // Keep our own package outside the VPN for blacklist and fully-enabled routing.
+        // Relay sockets are protected individually, but fast reconnect paths (network
+        // changes, transport restarts, etc.) can still race with protect(fd) before a
+        // fresh connect fully inherits the bypass. Adding the app package here gives us
+        // a process-level safety net against accidental control-channel loops.
+        val routedPackages = when (splitMode) {
+            SplitTunnelMode.ONLY_SELECTED -> {
+                require(selectedPackages.isNotEmpty()) {
+                    "At least one app must be selected for only-selected routing."
+                }
+                selectedPackages
+            }
+            SplitTunnelMode.EXCLUDE_SELECTED -> {
+                (selectedPackages + packageName).distinct()
+            }
+            SplitTunnelMode.DISABLED -> {
+                listOf(packageName)
+            }
         }
 
         val failedPackages = mutableListOf<String>()
-        routingPackages.forEach { packageName ->
+        routedPackages.forEach { targetPackage ->
             runCatching {
                 if (useAllowedApplications) {
-                    addAllowedApplication(packageName)
+                    addAllowedApplication(targetPackage)
                 } else {
-                    addDisallowedApplication(packageName)
+                    addDisallowedApplication(targetPackage)
                 }
             }.onFailure { error ->
-                failedPackages += packageName
+                failedPackages += targetPackage
                 when (error) {
                     is PackageManager.NameNotFoundException -> {
                         Log.w(TAG, "App routing entry is no longer installed.")
@@ -490,7 +465,7 @@ class VpnCoreService : VpnService() {
 
         if (failedPackages.isNotEmpty()) {
             throw IllegalStateException(
-                if (failedPackages.size == routingPackages.size) {
+                if (failedPackages.size == routedPackages.size) {
                     "Unable to apply any app routing rules. Refresh the selected apps list."
                 } else {
                     "Unable to apply all app routing rules. Refresh the selected apps list."
@@ -502,26 +477,9 @@ class VpnCoreService : VpnService() {
             TAG,
             "Applied routing mode $splitMode using " +
                 (if (useAllowedApplications) "allowed" else "disallowed") +
-                " list with ${routingPackages.size} entries.",
+                " list with ${routedPackages.size} entries.",
         )
         return this
-    }
-
-    private fun resolveInstalledPackageNames(): List<String> {
-        val installedApplications = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            packageManager.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0))
-        } else {
-            @Suppress("DEPRECATION")
-            packageManager.getInstalledApplications(0)
-        }
-
-        return installedApplications
-            .asSequence()
-            .map { it.packageName.trim() }
-            .filter(String::isNotBlank)
-            .distinct()
-            .sorted()
-            .toList()
     }
 
     private fun stopVpn() {
@@ -569,7 +527,8 @@ class VpnCoreService : VpnService() {
                             VpnRuntimeState(
                                 status = VpnConnectionStatus.Error,
                                 headline = "Failed to stop VPN core",
-                                detail = error.message ?: "vpncore.stop() failed while closing the TUN interface.",
+                                detail = error.message
+                                    ?: "vpncore.stop() failed while closing the TUN interface.",
                                 engineAvailable = vpnCoreBridge.isLinked,
                                 engineDiagnostics = vpnCoreBridge.linkErrorMessage,
                             )
@@ -604,6 +563,79 @@ class VpnCoreService : VpnService() {
         reconfigThread = null
     }
 
+    private fun onPackageChanged(packageName: String) {
+        packageResolver.onPackageChanged(packageName)
+        val profile = activeProfile ?: return
+        if (profile.splitTunnelMode == SplitTunnelMode.DISABLED) {
+            return
+        }
+        vpnCoreBridge.onPackageChanged(packageName)
+    }
+
+    private fun registerPackageReceiver() {
+        if (isPackageReceiverRegistered) {
+            return
+        }
+
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED)
+            addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addAction(Intent.ACTION_PACKAGE_REPLACED)
+            addDataScheme("package")
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(
+                packageBroadcastReceiver,
+                filter,
+                RECEIVER_NOT_EXPORTED,
+            )
+        } else {
+            registerReceiver(packageBroadcastReceiver, filter)
+        }
+        isPackageReceiverRegistered = true
+    }
+
+    private fun unregisterPackageReceiver() {
+        if (!isPackageReceiverRegistered) {
+            return
+        }
+
+        runCatching {
+            unregisterReceiver(packageBroadcastReceiver)
+        }.onFailure {
+            Log.w(TAG, "Package receiver cleanup failed.")
+        }
+        isPackageReceiverRegistered = false
+    }
+
+    private fun registerNetworkCallback() {
+        if (isNetworkCallbackRegistered) {
+            return
+        }
+
+        runCatching {
+            connectivityManager.registerDefaultNetworkCallback(networkCallback)
+        }.onSuccess {
+            isNetworkCallbackRegistered = true
+        }.onFailure {
+            Log.w(TAG, "Network callback registration failed.")
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        if (!isNetworkCallbackRegistered) {
+            return
+        }
+
+        runCatching {
+            connectivityManager.unregisterNetworkCallback(networkCallback)
+        }.onFailure {
+            Log.w(TAG, "Network callback cleanup failed.")
+        }
+        isNetworkCallbackRegistered = false
+    }
+
     private fun publishState(state: VpnRuntimeState) {
         stateStore.set(state)
         runCatching {
@@ -621,6 +653,8 @@ class VpnCoreService : VpnService() {
 
     override fun onDestroy() {
         shutdownReconfigWorker()
+        unregisterPackageReceiver()
+        unregisterNetworkCallback()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -639,6 +673,14 @@ class VpnCoreService : VpnService() {
 
         fun stopIntent(context: Context): Intent {
             return Intent(context, VpnCoreService::class.java).setAction(ACTION_STOP)
+        }
+    }
+
+    private fun foregroundServiceType(): Int {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED
+        } else {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MANIFEST
         }
     }
 }

@@ -35,6 +35,10 @@ data class MaydayStrings(
     val exceptSelected: String,
     val apps: String,
     val relay: String,
+    val relays: String,
+    val relayId: String,
+    val relayAddress: String,
+    val shortId: String,
     val userId: String,
     val dns: String,
     val autoFailover: String,
@@ -56,7 +60,9 @@ data class MaydayStrings(
     val mtu: String,
     val keepSessionAliveHint: String,
     val importedFrom: String,
+    val relaysHint: String,
     val serversHint: String,
+    val addRelay: String,
     val addServer: String,
     val remove: String,
     val server: String,
@@ -123,6 +129,10 @@ fun maydayStrings(language: AppLanguage): MaydayStrings {
             exceptSelected = "все кроме выбранных",
             apps = "приложения",
             relay = "relay",
+            relays = "relay",
+            relayId = "relay id",
+            relayAddress = "addr",
+            shortId = "short id",
             userId = "user id",
             dns = "dns",
             autoFailover = "автопереключение",
@@ -144,7 +154,9 @@ fun maydayStrings(language: AppLanguage): MaydayStrings {
             mtu = "mtu",
             keepSessionAliveHint = "сохранять сессию при смене активного сетевого пути",
             importedFrom = "Импортировано из",
+            relaysHint = "vpncore получает весь массив relays[] и сам управляет пулом relay-соединений.",
             serversHint = "vpncore получает весь массив servers[] и сам выбирает целевой сервер.",
+            addRelay = "добавить relay",
             addServer = "добавить сервер",
             remove = "удалить",
             server = "сервер",
@@ -160,7 +172,7 @@ fun maydayStrings(language: AppLanguage): MaydayStrings {
             noAppsFoundHint = "Измените поисковый запрос или включите системные приложения, чтобы увидеть больше пакетов.",
             noPerAppSelectionHint = "В этом режиме отдельный выбор приложений не требуется.",
             onboardingImportHint = "client.yaml / client.json",
-            onboardingManualHint = "relay, user id, servers[]",
+            onboardingManualHint = "relays, user id, servers[]",
             onboardingContinueHint = "открыть главный экран без импорта",
             readSavedRoutingState = "Читаем сохранённый режим и список приложений...",
             readSplitRoutingState = "Читаем режим split routing и список приложений из хранилища.",
@@ -169,6 +181,7 @@ fun maydayStrings(language: AppLanguage): MaydayStrings {
             failedImportSelectedFile = "Не удалось импортировать выбранный файл.",
             failedImportConfig = "Не удалось импортировать конфиг.",
             atLeastOneServerRequired = "Нужно указать хотя бы один сервер.",
+            atLeastOneAppRequired = "Выберите хотя бы одно приложение.",
             profileSaved = "Профиль сохранён",
             failedSaveProfile = "Не удалось сохранить профиль.",
             failedSaveRoutingSettings = "Не удалось сохранить настройки маршрутизации.",
@@ -207,6 +220,10 @@ fun maydayStrings(language: AppLanguage): MaydayStrings {
             exceptSelected = "all except selected",
             apps = "apps",
             relay = "relay",
+            relays = "relays",
+            relayId = "relay id",
+            relayAddress = "address",
+            shortId = "short id",
             userId = "user id",
             dns = "dns",
             autoFailover = "auto failover",
@@ -228,7 +245,9 @@ fun maydayStrings(language: AppLanguage): MaydayStrings {
             mtu = "mtu",
             keepSessionAliveHint = "keep the session alive when the active path changes",
             importedFrom = "Imported from",
+            relaysHint = "vpncore receives the full relays[] array and manages the relay pool on its own.",
             serversHint = "vpncore receives the full servers[] array and picks the target on its own.",
+            addRelay = "add relay",
             addServer = "add server",
             remove = "remove",
             server = "server",
@@ -244,7 +263,7 @@ fun maydayStrings(language: AppLanguage): MaydayStrings {
             noAppsFoundHint = "Change the search query or include system apps to see more packages.",
             noPerAppSelectionHint = "No per-app selection is needed in this mode.",
             onboardingImportHint = "client.yaml / client.json",
-            onboardingManualHint = "relay, user id, servers[]",
+            onboardingManualHint = "relays, user id, servers[]",
             onboardingContinueHint = "open the dashboard without importing now",
             readSavedRoutingState = "Reading saved routing state...",
             readSplitRoutingState = "Reading split routing mode and installed apps from storage.",
@@ -253,6 +272,7 @@ fun maydayStrings(language: AppLanguage): MaydayStrings {
             failedImportSelectedFile = "Failed to import the selected file.",
             failedImportConfig = "Failed to import config.",
             atLeastOneServerRequired = "At least one server is required.",
+            atLeastOneAppRequired = "Select at least one app.",
             profileSaved = "Profile saved",
             failedSaveProfile = "Failed to save profile.",
             failedSaveRoutingSettings = "Failed to save routing settings.",
@@ -265,6 +285,13 @@ fun MaydayStrings.serverCountLabel(count: Int): String {
     return when (locale) {
         AppLanguage.RU -> "$count ${russianServers(count)}"
         AppLanguage.EN -> "$count ${if (count == 1) "server" else "servers"}"
+    }
+}
+
+fun MaydayStrings.relayCountLabel(count: Int): String {
+    return when (locale) {
+        AppLanguage.RU -> "$count relay"
+        AppLanguage.EN -> "$count ${if (count == 1) "relay" else "relays"}"
     }
 }
 

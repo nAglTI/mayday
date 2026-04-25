@@ -45,18 +45,51 @@ class AarBackedVpnCoreBridge @Inject constructor() : VpnCoreBridge {
                         request.tunReconfigurator.reconfigure(assignedIP, maskBits)
                     }
                 }
+                val nativeResolver = request.packageResolver?.let { resolver ->
+                    object : vpncore.PackageResolver {
+                        override fun resolveOwner(
+                            proto: String,
+                            local: String,
+                            remote: String,
+                        ): String {
+                            return resolver.resolveOwner(proto, local, remote)
+                        }
+                    }
+                }
 
                 runner = Vpncore.runClient(
                     request.tunFileDescriptor.toLong(),
                     request.configJson,
                     nativeProtector,
                     nativeReconfigurator,
+                    nativeResolver,
                 )
                 checkNotNull(runner) { "Vpncore.runClient returned null runner." }
                 Unit
             }.onFailure {
                 Log.e(TAG, "Start request failed.")
             }
+        }
+    }
+
+    override fun onPackageChanged(packageName: String) {
+        if (packageName.isBlank()) {
+            return
+        }
+        val activeRunner = runner ?: return
+        runCatching {
+            activeRunner.onPackageChanged(packageName)
+        }.onFailure {
+            Log.e(TAG, "Package change dispatch failed.")
+        }
+    }
+
+    override fun onNetworkChange() {
+        val activeRunner = runner ?: return
+        runCatching {
+            activeRunner.onNetworkChange()
+        }.onFailure {
+            Log.e(TAG, "Network change dispatch failed.")
         }
     }
 

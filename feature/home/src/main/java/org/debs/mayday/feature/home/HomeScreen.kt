@@ -119,7 +119,7 @@ internal fun HomeScreen(
                     MaydaySectionTitle(text = strings.profile)
                     MaydaySurfaceCard {
                         MaydayStatRow(
-                            label = strings.relay,
+                            label = strings.relays,
                             value = state.endpointSummary.ifBlank { strings.relayNotConfigured },
                         )
                         MaydayStatRow(label = strings.servers, value = strings.serverCountLabel(state.serverCount))

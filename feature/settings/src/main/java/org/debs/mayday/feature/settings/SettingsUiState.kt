@@ -9,8 +9,7 @@ import org.debs.mayday.core.model.UiPreferences
 data class SettingsUiState(
     val uiPreferences: UiPreferences = UiPreferences(),
     val profileName: String = "",
-    val relayHost: String = "",
-    val relayPort: String = "443",
+    val relays: List<RelayDraft> = listOf(RelayDraft()),
     val userId: String = "",
     val servers: List<ServerDraft> = listOf(ServerDraft()),
     val tunName: String = "",

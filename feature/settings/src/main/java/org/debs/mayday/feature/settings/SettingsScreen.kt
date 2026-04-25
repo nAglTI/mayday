@@ -40,6 +40,7 @@ import org.debs.mayday.core.designsystem.component.MaydayTopBar
 import org.debs.mayday.core.designsystem.theme.LocalMaydayDensity
 import org.debs.mayday.core.designsystem.theme.MaydayStrings
 import org.debs.mayday.core.designsystem.theme.maydayStrings
+import org.debs.mayday.core.designsystem.theme.relayCountLabel
 import org.debs.mayday.core.designsystem.theme.serverCountLabel
 import org.debs.mayday.core.designsystem.theme.serverTitle
 import org.debs.mayday.core.model.AppDensity
@@ -71,7 +72,7 @@ internal fun SettingsScreen(
                     primaryText = if (state.isLoading) strings.saving else strings.saveProfile,
                     onPrimaryClick = { onEvent(SettingsUiEvent.SaveClicked) },
                     enabled = !state.isLoading,
-                    supportingText = "${strings.serverCountLabel(state.servers.size)} | ${routingSummary(strings, state.splitTunnelMode, state.selectedPackageCount)}",
+                    supportingText = "${strings.relayCountLabel(state.relays.size)} | ${strings.serverCountLabel(state.servers.size)} | ${routingSummary(strings, state.splitTunnelMode, state.selectedPackageCount)}",
                 )
             },
         ) { innerPadding ->
@@ -141,16 +142,6 @@ internal fun SettingsScreen(
                                 value = state.profileName,
                                 onValueChange = { onEvent(SettingsUiEvent.ProfileNameChanged(it)) },
                             )
-                            SettingsField(
-                                label = strings.relay,
-                                value = state.relayHost,
-                                onValueChange = { onEvent(SettingsUiEvent.RelayHostChanged(it)) },
-                            )
-                            SettingsNumberField(
-                                label = strings.port,
-                                value = state.relayPort,
-                                onValueChange = { onEvent(SettingsUiEvent.RelayPortChanged(it)) },
-                            )
                             SettingsNumberField(
                                 label = strings.userId,
                                 value = state.userId,
@@ -218,6 +209,66 @@ internal fun SettingsScreen(
 
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MaydaySectionTitle(text = strings.relays)
+                        MaydaySurfaceCard {
+                            Text(
+                                text = strings.relaysHint,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            MaydayActionButton(
+                                text = strings.addRelay,
+                                onClick = { onEvent(SettingsUiEvent.AddRelayClicked) },
+                                modifier = Modifier.fillMaxWidth(),
+                                filled = false,
+                            )
+                        }
+                    }
+                }
+
+                itemsIndexed(state.relays, key = { index, _ -> "relay-$index" }) { index, relay ->
+                    MaydaySurfaceCard {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "${strings.relay} ${index + 1}",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            MaydayActionButton(
+                                text = strings.remove,
+                                onClick = { onEvent(SettingsUiEvent.RemoveRelayClicked(index)) },
+                                modifier = Modifier
+                                    .width(124.dp)
+                                    .height(44.dp),
+                                enabled = state.relays.size > 1,
+                                filled = false,
+                            )
+                        }
+                        SettingsField(
+                            label = strings.relayId,
+                            value = relay.id,
+                            onValueChange = { onEvent(SettingsUiEvent.RelayIdChanged(index, it)) },
+                        )
+                        SettingsField(
+                            label = strings.relayAddress,
+                            value = relay.addr,
+                            onValueChange = { onEvent(SettingsUiEvent.RelayAddressChanged(index, it)) },
+                        )
+                        SettingsNumberField(
+                            label = strings.shortId,
+                            value = relay.shortId,
+                            onValueChange = { onEvent(SettingsUiEvent.RelayShortIdChanged(index, it)) },
+                        )
+                    }
+                }
+
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         MaydaySectionTitle(text = strings.servers)
                         MaydaySurfaceCard {
                             Text(
@@ -235,7 +286,7 @@ internal fun SettingsScreen(
                     }
                 }
 
-                itemsIndexed(state.servers, key = { index, _ -> index }) { index, server ->
+                itemsIndexed(state.servers, key = { index, _ -> "server-$index" }) { index, server ->
                     MaydaySurfaceCard {
                         Row(
                             modifier = Modifier.fillMaxWidth(),

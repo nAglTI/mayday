@@ -4,7 +4,7 @@ Android VPN client shell for the `vpncore.aar` Go runtime. The app provides:
 
 - VPN start and stop via `VpnService`
 - profile import from YAML or JSON
-- editing relay, user ID, DNS, MTU, and `servers[]`
+- editing `relays[]`, user ID, DNS, MTU, and `servers[]`
 - split tunnel by Android package name
 
 ## Requirements
@@ -12,7 +12,7 @@ Android VPN client shell for the `vpncore.aar` Go runtime. The app provides:
 - Android 8.0+ (`minSdk 26`)
 - a valid `vpncore.aar` in `app/libs/`
 - a valid client config with:
-  - `relay`
+  - `relays[]`
   - `user_id`
   - at least one server in `servers[]`
 
@@ -31,7 +31,7 @@ APK output:
 1. Install the debug APK on the device.
 2. Open `Settings`.
 3. Import a YAML or JSON config, or fill the fields manually.
-4. Check relay, `user_id`, and the server list.
+4. Check `relays[]`, `user_id`, and the server list.
 5. Optionally configure DNS, MTU, and split tunnel.
 6. Tap `Save profile`.
 7. Go to `Home` and tap `Start VPN`.
@@ -46,7 +46,13 @@ Minimal JSON example:
 
 ```json
 {
-  "relay": "relay.example.com:51821",
+  "relays": [
+    {
+      "id": "relay-1",
+      "addr": "relay.example.com:51821",
+      "short_id": 1
+    }
+  ],
   "user_id": 1,
   "dns": "1.1.1.1",
   "servers": [
@@ -62,7 +68,10 @@ Minimal JSON example:
 Minimal YAML example:
 
 ```yaml
-relay: relay.example.com:51821
+relays:
+  - id: relay-1
+    addr: relay.example.com:51821
+    short_id: 1
 user_id: 1
 dns: 1.1.1.1
 servers:
@@ -106,6 +115,6 @@ This file intentionally stays high-level and does not document low-level protoco
 ## Troubleshooting
 
 - If `vpncore.aar` is missing or incompatible, the app reports that the core could not be initialized.
-- If import fails, verify that the config contains `relay`, `user_id`, and at least one server in `servers[]`.
-- If VPN startup succeeds but there is no traffic, check the imported relay and server values first, then inspect `logcat` for `VpnCoreService` and `AarBackedVpnCoreBridge`.
+- If import fails, verify that the config contains `relays[]`, `user_id`, and at least one server in `servers[]`.
+- If VPN startup succeeds but there is no traffic, check the imported relay list and server values first, then inspect `logcat` for `VpnCoreService` and `AarBackedVpnCoreBridge`.
 - If stop remains in `Stopping` and the Android VPN key does not disappear, the client is waiting for `vpncore.stop()` to close the active TUN. In that case the next thing to inspect is the AAR runtime.

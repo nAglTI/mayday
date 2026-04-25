@@ -10,11 +10,10 @@ sealed interface SettingsUiEvent {
     data object OpenSplitClicked : SettingsUiEvent
     data object SaveClicked : SettingsUiEvent
     data object ImportClicked : SettingsUiEvent
+    data object AddRelayClicked : SettingsUiEvent
     data object AddServerClicked : SettingsUiEvent
     data object MessageShown : SettingsUiEvent
     data class ProfileNameChanged(val value: String) : SettingsUiEvent
-    data class RelayHostChanged(val value: String) : SettingsUiEvent
-    data class RelayPortChanged(val value: String) : SettingsUiEvent
     data class UserIdChanged(val value: String) : SettingsUiEvent
     data class TunNameChanged(val value: String) : SettingsUiEvent
     data class DnsChanged(val value: String) : SettingsUiEvent
@@ -23,7 +22,20 @@ sealed interface SettingsUiEvent {
     data class ThemeModeChanged(val value: AppThemeMode) : SettingsUiEvent
     data class LanguageChanged(val value: AppLanguage) : SettingsUiEvent
     data class DensityChanged(val value: AppDensity) : SettingsUiEvent
+    data class RemoveRelayClicked(val index: Int) : SettingsUiEvent
     data class RemoveServerClicked(val index: Int) : SettingsUiEvent
+    data class RelayIdChanged(
+        val index: Int,
+        val value: String,
+    ) : SettingsUiEvent
+    data class RelayAddressChanged(
+        val index: Int,
+        val value: String,
+    ) : SettingsUiEvent
+    data class RelayShortIdChanged(
+        val index: Int,
+        val value: String,
+    ) : SettingsUiEvent
     data class ServerIdChanged(
         val index: Int,
         val value: String,

@@ -113,6 +113,12 @@ class SplitViewModel @Inject constructor(
                     .map(String::trim)
                     .filter(String::isNotBlank)
                     .toSet()
+                if (
+                    uiState.value.splitTunnelMode == SplitTunnelMode.ONLY_SELECTED &&
+                    selectedPackages.isEmpty()
+                ) {
+                    error(strings().atLeastOneAppRequired)
+                }
                 val latestProfile = profileRepository.profile.first()
                 profileRepository.save(
                     latestProfile.copy(

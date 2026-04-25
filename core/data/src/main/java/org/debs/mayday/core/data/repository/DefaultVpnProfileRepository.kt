@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import org.debs.mayday.core.model.SplitTunnelMode
 import org.debs.mayday.core.model.VpnProfile
+import org.debs.mayday.core.model.VpnRelayTarget
 import org.debs.mayday.core.model.VpnServerTarget
 import org.json.JSONArray
 import org.json.JSONObject
@@ -33,8 +34,7 @@ class DefaultVpnProfileRepository @Inject constructor(
     override val profile: Flow<VpnProfile> = dataStore.data.map { preferences ->
         VpnProfile(
             profileName = preferences[PROFILE_NAME] ?: "Primary",
-            relayHost = preferences[RELAY_HOST].orEmpty(),
-            relayPort = preferences[RELAY_PORT] ?: 443,
+            relays = readRelays(preferences),
             userId = preferences[USER_ID].orEmpty(),
             servers = readServers(preferences),
             tunName = preferences[TUN_NAME].orEmpty(),
@@ -72,8 +72,11 @@ class DefaultVpnProfileRepository @Inject constructor(
     private suspend fun persistProfile(profile: VpnProfile) {
         dataStore.edit { preferences ->
             preferences[PROFILE_NAME] = profile.profileName.trim().ifEmpty { "Primary" }
-            preferences[RELAY_HOST] = profile.relayHost.trim()
-            preferences[RELAY_PORT] = profile.relayPort.coerceIn(1, 65535)
+            preferences[RELAYS_JSON] = encodeRelays(profile.relays)
+            val primaryRelay = profile.relays.firstOrNull()
+            val legacyRelay = primaryRelay?.addr.orEmpty().parseRelayAddress()
+            preferences[RELAY_HOST] = legacyRelay?.first.orEmpty()
+            preferences[RELAY_PORT] = legacyRelay?.second ?: 443
             preferences[USER_ID] = profile.userId.trim()
             preferences[SERVERS_JSON] = encodeServers(profile.servers)
             profile.servers.firstOrNull()?.let { server ->
@@ -113,6 +116,7 @@ class DefaultVpnProfileRepository @Inject constructor(
         val RELAY_HOST = stringPreferencesKey("relay_host")
         val RELAY_PORT = intPreferencesKey("relay_port")
         val USER_ID = stringPreferencesKey("user_id")
+        val RELAYS_JSON = stringPreferencesKey("relays_json")
         val SERVERS_JSON = stringPreferencesKey("servers_json")
         val SERVER_ID = stringPreferencesKey("server_id")
         val SERVER_KEY = stringPreferencesKey("server_key")
@@ -123,6 +127,44 @@ class DefaultVpnProfileRepository @Inject constructor(
         val SPLIT_MODE = intPreferencesKey("split_mode")
         val SELECTED_PACKAGES = stringPreferencesKey("selected_packages")
         val AUTO_RECONNECT = booleanPreferencesKey("auto_reconnect")
+    }
+
+    private fun readRelays(preferences: Preferences): List<VpnRelayTarget> {
+        val relaysJson = preferences[RELAYS_JSON].orEmpty()
+        if (relaysJson.isNotBlank()) {
+            return runCatching {
+                val array = JSONArray(relaysJson)
+                buildList {
+                    for (index in 0 until array.length()) {
+                        val item = array.getJSONObject(index)
+                        val addr = item.optString("addr").trim()
+                        if (addr.isBlank()) {
+                            continue
+                        }
+                        add(
+                            VpnRelayTarget(
+                                id = item.optString("id").trim().ifBlank { "relay-${index + 1}" },
+                                addr = addr,
+                                shortId = item.optInt("short_id", index + 1).coerceAtLeast(1),
+                            ),
+                        )
+                    }
+                }
+            }.getOrDefault(emptyList())
+        }
+
+        val legacyHost = preferences[RELAY_HOST].orEmpty().trim()
+        if (legacyHost.isBlank()) {
+            return emptyList()
+        }
+
+        return listOf(
+            VpnRelayTarget(
+                id = "relay-1",
+                addr = "$legacyHost:${preferences[RELAY_PORT] ?: 443}",
+                shortId = 1,
+            ),
+        )
     }
 
     private fun readServers(preferences: Preferences): List<VpnServerTarget> {
@@ -160,6 +202,23 @@ class DefaultVpnProfileRepository @Inject constructor(
         )
     }
 
+    private fun encodeRelays(relays: List<VpnRelayTarget>): String {
+        val array = JSONArray()
+        relays.forEachIndexed { index, relay ->
+            val addr = relay.addr.trim()
+            if (addr.isBlank()) {
+                return@forEachIndexed
+            }
+            array.put(
+                JSONObject()
+                    .put("id", relay.id.trim().ifBlank { "relay-${index + 1}" })
+                    .put("addr", addr)
+                    .put("short_id", relay.shortId.coerceAtLeast(1)),
+            )
+        }
+        return array.toString()
+    }
+
     private fun encodeServers(servers: List<VpnServerTarget>): String {
         val array = JSONArray()
         servers.forEach { server ->
@@ -171,5 +230,26 @@ class DefaultVpnProfileRepository @Inject constructor(
             )
         }
         return array.toString()
+    }
+
+    private fun String.parseRelayAddress(): Pair<String, Int>? {
+        val trimmed = trim()
+        if (trimmed.isBlank()) {
+            return null
+        }
+
+        val separatorIndex = trimmed.lastIndexOf(':')
+        if (separatorIndex <= 0 || separatorIndex == trimmed.lastIndex) {
+            return null
+        }
+
+        val host = trimmed.substring(0, separatorIndex).trim()
+        val port = trimmed.substring(separatorIndex + 1).trim().toIntOrNull()
+            ?.takeIf { it in 1..65535 }
+            ?: return null
+        if (host.isBlank()) {
+            return null
+        }
+        return host to port
     }
 }

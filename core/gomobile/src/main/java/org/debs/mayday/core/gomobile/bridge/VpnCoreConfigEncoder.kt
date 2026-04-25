@@ -11,15 +11,14 @@ import javax.inject.Singleton
 class VpnCoreConfigEncoder @Inject constructor() {
 
     fun encode(profile: VpnProfile): String {
-        val relayHost = profile.relayHost.trim()
         val userId = profile.userId.trim().toLongOrNull()
 
-        require(relayHost.isNotBlank()) { "Relay host is required." }
+        require(profile.relays.isNotEmpty()) { "At least one relay is required." }
         require(userId != null && userId >= 0) { "User ID must be a non-negative integer." }
         require(profile.servers.isNotEmpty()) { "At least one server is required." }
 
         val root = JSONObject()
-            .put("relay", "$relayHost:${profile.relayPort}")
+            .put("relays", buildRelaysArray(profile))
             .put("user_id", userId)
             .put("dns", profile.dnsServers.firstOrNull().orEmpty().ifBlank { "1.1.1.1" })
             .put("servers", buildServersArray(profile))
@@ -33,6 +32,21 @@ class VpnCoreConfigEncoder @Inject constructor() {
         }
 
         return root.toString()
+    }
+
+    private fun buildRelaysArray(profile: VpnProfile): JSONArray {
+        val array = JSONArray()
+        profile.relays.forEachIndexed { index, relay ->
+            val addr = relay.addr.trim()
+            require(addr.isNotBlank()) { "Relay address is required." }
+            array.put(
+                JSONObject()
+                    .put("id", relay.id.trim().ifBlank { "relay-${index + 1}" })
+                    .put("addr", addr)
+                    .put("short_id", relay.shortId.coerceAtLeast(1)),
+            )
+        }
+        return array
     }
 
     private fun buildServersArray(profile: VpnProfile): JSONArray {
