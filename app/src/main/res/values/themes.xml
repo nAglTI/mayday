@@ -1,0 +1,13 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.Mayday" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/mayday_primary</item>
+        <item name="colorPrimaryContainer">@color/mayday_primary_dark</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@color/mayday_background</item>
+        <item name="android:windowBackground">@color/mayday_background</item>
+        <item name="android:colorBackground">@color/mayday_background</item>
+        <item name="colorSurface">@color/mayday_surface</item>
+        <item name="colorOnSurface">@color/mayday_on_surface</item>
+        <item name="colorOnSurfaceVariant">@color/mayday_on_surface_variant</item>
+    </style>
+</resources>

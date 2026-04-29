@@ -1,0 +1,16 @@
+<resources>
+    <string name="mayday_vpn_channel_name">сервис mayday</string>
+    <string name="mayday_vpn_channel_description">Фоновый канал для сервиса mayday.</string>
+    <string name="mayday_vpn_notification_title">mayday</string>
+    <string name="mayday_vpn_notification_text">VPN-сервис работает.</string>
+    <string name="mayday_vpn_notification_idle_title">mayday отключен</string>
+    <string name="mayday_vpn_notification_idle_text">Нажмите подключить, чтобы запустить туннель.</string>
+    <string name="mayday_vpn_action_connect">подключить</string>
+    <string name="mayday_vpn_action_disconnect">отключить</string>
+    <string name="mayday_vpn_tile_label">mayday</string>
+    <string name="mayday_vpn_tile_connected">подключен</string>
+    <string name="mayday_vpn_tile_disconnected">отключен</string>
+    <string name="mayday_vpn_tile_starting">подключение</string>
+    <string name="mayday_vpn_tile_stopping">отключение</string>
+    <string name="mayday_vpn_tile_unavailable">нужно разрешение</string>
+</resources>

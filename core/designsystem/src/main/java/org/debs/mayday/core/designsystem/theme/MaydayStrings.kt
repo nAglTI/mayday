@@ -1,0 +1,418 @@
+package org.debs.mayday.core.designsystem.theme
+
+import org.debs.mayday.core.model.AppLanguage
+
+data class MaydayStrings(
+    val locale: AppLanguage,
+    val appName: String,
+    val tagline: String,
+    val connect: String,
+    val disconnect: String,
+    val connecting: String,
+    val connected: String,
+    val disconnected: String,
+    val reconnecting: String,
+    val settings: String,
+    val theme: String,
+    val language: String,
+    val density: String,
+    val light: String,
+    val dark: String,
+    val compact: String,
+    val comfortable: String,
+    val profile: String,
+    val splitRouting: String,
+    val advanced: String,
+    val diagnostics: String,
+    val importConfig: String,
+    val importFile: String,
+    val manual: String,
+    val continueLabel: String,
+    val onboardingTitle: String,
+    val onboardingSubtitle: String,
+    val allTraffic: String,
+    val onlySelected: String,
+    val exceptSelected: String,
+    val apps: String,
+    val relay: String,
+    val relays: String,
+    val relayId: String,
+    val relayAddress: String,
+    val relayPorts: String,
+    val shortId: String,
+    val userId: String,
+    val dns: String,
+    val transport: String,
+    val auto: String,
+    val tcp: String,
+    val utp: String,
+    val serverFailbackDelay: String,
+    val autoFailover: String,
+    val current: String,
+    val routingSummary: String,
+    val saveProfile: String,
+    val status: String,
+    val detail: String,
+    val engine: String,
+    val ready: String,
+    val missing: String,
+    val servers: String,
+    val priority: String,
+    val notSet: String,
+    val relayNotConfigured: String,
+    val profileField: String,
+    val port: String,
+    val tun: String,
+    val mtu: String,
+    val keepSessionAliveHint: String,
+    val importedFrom: String,
+    val relaysHint: String,
+    val serversHint: String,
+    val addRelay: String,
+    val addServer: String,
+    val remove: String,
+    val server: String,
+    val serverId: String,
+    val serverKey: String,
+    val loading: String,
+    val saving: String,
+    val preparingWorkspace: String,
+    val showSystemApps: String,
+    val showSystemAppsHint: String,
+    val search: String,
+    val noAppsFound: String,
+    val noAppsFoundHint: String,
+    val noPerAppSelectionHint: String,
+    val onboardingImportHint: String,
+    val onboardingManualHint: String,
+    val onboardingContinueHint: String,
+    val readSavedRoutingState: String,
+    val readSplitRoutingState: String,
+    val failedReadSelectedFile: String,
+    val unableToOpenSelectedConfigFile: String,
+    val failedImportSelectedFile: String,
+    val failedImportConfig: String,
+    val atLeastOneRelayRequired: String,
+    val atLeastOneServerRequired: String,
+    val userIdMustBeNonNegativeInteger: String,
+    val relayShortIdsMustBeUnique: String,
+    val relayPortsInvalid: String,
+    val serverFailbackDelayInvalid: String,
+    val serverKeyMustBe64Hex: String,
+    val atLeastOneAppRequired: String = "Select at least one app.",
+    val profileSaved: String,
+    val failedSaveProfile: String,
+    val failedSaveRoutingSettings: String,
+    val config: String,
+)
+
+fun maydayStrings(language: AppLanguage): MaydayStrings {
+    return when (language) {
+        AppLanguage.RU -> MaydayStrings(
+            locale = AppLanguage.RU,
+            appName = "mayday",
+            tagline = "сетевой клиент",
+            connect = "подключиться",
+            disconnect = "отключиться",
+            connecting = "подключение",
+            connected = "подключено",
+            disconnected = "отключено",
+            reconnecting = "переподключение",
+            settings = "настройки",
+            theme = "тема",
+            language = "язык",
+            density = "плотность",
+            light = "светлая",
+            dark = "тёмная",
+            compact = "компактная",
+            comfortable = "обычная",
+            profile = "профиль",
+            splitRouting = "маршрутизация",
+            advanced = "расширенные",
+            diagnostics = "диагностика",
+            importConfig = "импорт конфига",
+            importFile = "файл",
+            manual = "вручную",
+            continueLabel = "пропустить",
+            onboardingTitle = "подключение",
+            onboardingSubtitle = "импортируйте конфигурацию или откройте профиль для ручной настройки",
+            allTraffic = "весь трафик",
+            onlySelected = "только выбранные",
+            exceptSelected = "все кроме выбранных",
+            apps = "приложения",
+            relay = "ретранслятор",
+            relays = "ретрансляторы",
+            relayId = "ID ретранслятора",
+            relayAddress = "адрес ретранслятора",
+            relayPorts = "порты",
+            shortId = "короткий ID",
+            userId = "ID пользователя",
+            dns = "dns",
+            transport = "транспорт",
+            auto = "авто",
+            tcp = "tcp",
+            utp = "utp",
+            serverFailbackDelay = "возврат сервера, сек.",
+            autoFailover = "автопереключение",
+            current = "активный",
+            routingSummary = "режим маршрутизации",
+            saveProfile = "сохранить профиль",
+            status = "статус",
+            detail = "детали",
+            engine = "движок",
+            ready = "готов",
+            missing = "недоступен",
+            servers = "серверы",
+            priority = "приоритет",
+            notSet = "не задано",
+            relayNotConfigured = "ретранслятор не настроен",
+            profileField = "профиль",
+            port = "порт",
+            tun = "tun",
+            mtu = "mtu",
+            keepSessionAliveHint = "сохранять сессию при смене активного сетевого пути",
+            importedFrom = "Импортировано из",
+            relaysHint = "Адреса ретрансляторов сохранены в конфиге и скрыты в приложении.",
+            serversHint = "Ключи серверов сохранены в конфиге и скрыты в приложении. Верхний сервер — приоритет 1.",
+            addRelay = "добавить ретранслятор",
+            addServer = "добавить сервер",
+            remove = "удалить",
+            server = "сервер",
+            serverId = "ID сервера",
+            serverKey = "ключ сервера",
+            loading = "загрузка...",
+            saving = "сохранение...",
+            preparingWorkspace = "Подготавливаем рабочее пространство...",
+            showSystemApps = "показывать системные приложения",
+            showSystemAppsHint = "включить системные пакеты в список",
+            search = "поиск",
+            noAppsFound = "Приложения не найдены",
+            noAppsFoundHint = "Измените поисковый запрос или включите системные приложения, чтобы увидеть больше пакетов.",
+            noPerAppSelectionHint = "В этом режиме отдельный выбор приложений не требуется.",
+            onboardingImportHint = "client.yaml / client.json",
+            onboardingManualHint = "relays, servers[]",
+            onboardingContinueHint = "открыть главный экран без импорта",
+            readSavedRoutingState = "Читаем сохранённый режим и список приложений...",
+            readSplitRoutingState = "Читаем режим split routing и список приложений из хранилища.",
+            failedReadSelectedFile = "Не удалось прочитать выбранный файл.",
+            unableToOpenSelectedConfigFile = "Не удалось открыть выбранный конфиг.",
+            failedImportSelectedFile = "Не удалось импортировать выбранный файл.",
+            failedImportConfig = "Не удалось импортировать конфиг.",
+            atLeastOneRelayRequired = "Нужно указать хотя бы один ретранслятор.",
+            atLeastOneServerRequired = "Нужно указать хотя бы один сервер.",
+            userIdMustBeNonNegativeInteger = "ID пользователя должен быть положительным целым числом.",
+            relayShortIdsMustBeUnique = "Короткие ID ретрансляторов должны быть уникальными.",
+            relayPortsInvalid = "Порты ретранслятора должны быть числами от 1 до 65535.",
+            serverFailbackDelayInvalid = "Возврат сервера должен быть -1, 0 или положительным числом.",
+            serverKeyMustBe64Hex = "Ключ сервера должен быть 64-символьной hex-строкой.",
+            atLeastOneAppRequired = "Выберите хотя бы одно приложение.",
+            profileSaved = "Профиль сохранён",
+            failedSaveProfile = "Не удалось сохранить профиль.",
+            failedSaveRoutingSettings = "Не удалось сохранить настройки маршрутизации.",
+            config = "конфиг",
+        )
+        AppLanguage.EN -> MaydayStrings(
+            locale = AppLanguage.EN,
+            appName = "mayday",
+            tagline = "network client",
+            connect = "connect",
+            disconnect = "disconnect",
+            connecting = "connecting",
+            connected = "connected",
+            disconnected = "disconnected",
+            reconnecting = "reconnecting",
+            settings = "settings",
+            theme = "theme",
+            language = "language",
+            density = "density",
+            light = "light",
+            dark = "dark",
+            compact = "compact",
+            comfortable = "comfortable",
+            profile = "profile",
+            splitRouting = "split routing",
+            advanced = "advanced",
+            diagnostics = "diagnostics",
+            importConfig = "import config",
+            importFile = "file",
+            manual = "manual",
+            continueLabel = "skip",
+            onboardingTitle = "get connected",
+            onboardingSubtitle = "import a config file or open the profile editor for manual setup",
+            allTraffic = "all traffic",
+            onlySelected = "only selected",
+            exceptSelected = "all except selected",
+            apps = "apps",
+            relay = "relay",
+            relays = "relays",
+            relayId = "relay id",
+            relayAddress = "address",
+            relayPorts = "ports",
+            shortId = "short id",
+            userId = "user id",
+            dns = "dns",
+            transport = "transport",
+            auto = "auto",
+            tcp = "tcp",
+            utp = "utp",
+            serverFailbackDelay = "server failback, sec",
+            autoFailover = "auto failover",
+            current = "active",
+            routingSummary = "routing mode",
+            saveProfile = "save profile",
+            status = "status",
+            detail = "detail",
+            engine = "engine",
+            ready = "ready",
+            missing = "missing",
+            servers = "servers",
+            priority = "priority",
+            notSet = "not set",
+            relayNotConfigured = "Relay not configured",
+            profileField = "profile",
+            port = "port",
+            tun = "tun",
+            mtu = "mtu",
+            keepSessionAliveHint = "keep the session alive when the active path changes",
+            importedFrom = "Imported from",
+            relaysHint = "Relay addresses are stored in the config and hidden in the app.",
+            serversHint = "Server keys are stored in the config and hidden in the app. The top server is priority 1.",
+            addRelay = "add relay",
+            addServer = "add server",
+            remove = "remove",
+            server = "server",
+            serverId = "server id",
+            serverKey = "server key",
+            loading = "loading...",
+            saving = "saving...",
+            preparingWorkspace = "Preparing workspace...",
+            showSystemApps = "show system apps",
+            showSystemAppsHint = "include platform packages in the list",
+            search = "search",
+            noAppsFound = "No apps found",
+            noAppsFoundHint = "Change the search query or include system apps to see more packages.",
+            noPerAppSelectionHint = "No per-app selection is needed in this mode.",
+            onboardingImportHint = "client.yaml / client.json",
+            onboardingManualHint = "relays, servers[]",
+            onboardingContinueHint = "open the dashboard without importing now",
+            readSavedRoutingState = "Reading saved routing state...",
+            readSplitRoutingState = "Reading split routing mode and installed apps from storage.",
+            failedReadSelectedFile = "Failed to read the selected file.",
+            unableToOpenSelectedConfigFile = "Unable to open the selected config file.",
+            failedImportSelectedFile = "Failed to import the selected file.",
+            failedImportConfig = "Failed to import config.",
+            atLeastOneRelayRequired = "At least one relay is required.",
+            atLeastOneServerRequired = "At least one server is required.",
+            userIdMustBeNonNegativeInteger = "User ID must be a positive integer.",
+            relayShortIdsMustBeUnique = "Relay short IDs must be unique.",
+            relayPortsInvalid = "Relay ports must be numbers from 1 to 65535.",
+            serverFailbackDelayInvalid = "Server failback must be -1, 0, or a positive number.",
+            serverKeyMustBe64Hex = "Server key must be a 64-character hex string.",
+            atLeastOneAppRequired = "Select at least one app.",
+            profileSaved = "Profile saved",
+            failedSaveProfile = "Failed to save profile.",
+            failedSaveRoutingSettings = "Failed to save routing settings.",
+            config = "config",
+        )
+    }
+}
+
+fun MaydayStrings.serverCountLabel(count: Int): String {
+    return when (locale) {
+        AppLanguage.RU -> "$count ${russianServers(count)}"
+        AppLanguage.EN -> "$count ${if (count == 1) "server" else "servers"}"
+    }
+}
+
+fun MaydayStrings.relayCountLabel(count: Int): String {
+    return when (locale) {
+        AppLanguage.RU -> "$count ${russianRelays(count)}"
+        AppLanguage.EN -> "$count ${if (count == 1) "relay" else "relays"}"
+    }
+}
+
+fun MaydayStrings.serverTitle(index: Int): String {
+    return "$server $index"
+}
+
+fun MaydayStrings.importedServersMessage(count: Int): String {
+    return when (locale) {
+        AppLanguage.RU -> "Импортировано $count ${russianServers(count)}"
+        AppLanguage.EN -> "Imported ${serverCountLabel(count)}"
+    }
+}
+
+fun MaydayStrings.importedConfigMessage(sourceName: String): String {
+    return when (locale) {
+        AppLanguage.RU -> "Импортирован ${sourceName.ifBlank { config }}"
+        AppLanguage.EN -> "Imported ${sourceName.ifBlank { config }}"
+    }
+}
+
+val MaydayStrings.clipboard: String
+    get() = when (locale) {
+        AppLanguage.RU -> "буфер обмена"
+        AppLanguage.EN -> "clipboard"
+    }
+
+val MaydayStrings.importClipboard: String
+    get() = when (locale) {
+        AppLanguage.RU -> "из буфера обмена"
+        AppLanguage.EN -> "from clipboard"
+    }
+
+val MaydayStrings.importText: String
+    get() = when (locale) {
+        AppLanguage.RU -> "из текста"
+        AppLanguage.EN -> "from text"
+    }
+
+val MaydayStrings.configText: String
+    get() = when (locale) {
+        AppLanguage.RU -> "текст конфига"
+        AppLanguage.EN -> "config text"
+    }
+
+val MaydayStrings.clipboardEmpty: String
+    get() = when (locale) {
+        AppLanguage.RU -> "Буфер обмена пуст."
+        AppLanguage.EN -> "Clipboard is empty."
+    }
+
+val MaydayStrings.cancel: String
+    get() = when (locale) {
+        AppLanguage.RU -> "отмена"
+        AppLanguage.EN -> "cancel"
+    }
+
+val MaydayStrings.onboardingClipboardHint: String
+    get() = when (locale) {
+        AppLanguage.RU -> "mayday://import/... из буфера"
+        AppLanguage.EN -> "mayday://import/... from clipboard"
+    }
+
+val MaydayStrings.onboardingTextImportHint: String
+    get() = when (locale) {
+        AppLanguage.RU -> "mayday://import/... или YAML / JSON"
+        AppLanguage.EN -> "mayday://import/... or YAML / JSON"
+    }
+
+private fun russianServers(count: Int): String {
+    val mod10 = count % 10
+    val mod100 = count % 100
+    return when (mod10) {
+        1 if mod100 != 11 -> "сервер"
+        in 2..4 if mod100 !in 12..14 -> "сервера"
+        else -> "серверов"
+    }
+}
+
+private fun russianRelays(count: Int): String {
+    val mod10 = count % 10
+    val mod100 = count % 100
+    return when (mod10) {
+        1 if mod100 != 11 -> "ретранслятор"
+        in 2..4 if mod100 !in 12..14 -> "ретранслятора"
+        else -> "ретрансляторов"
+    }
+}

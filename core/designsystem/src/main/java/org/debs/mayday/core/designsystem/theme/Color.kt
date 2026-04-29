@@ -1,0 +1,31 @@
+package org.debs.mayday.core.designsystem.theme
+
+import androidx.compose.ui.graphics.Color
+
+val CalmLightBackground = Color(0xFFF5F3EF)
+val CalmLightSurface = Color(0xFFFFFFFF)
+val CalmLightSunken = Color(0xFFECE9E2)
+val CalmLightBorder = Color(0xFFD9D4C8)
+val CalmLightHairline = Color(0xFFE8E4DA)
+val CalmLightText = Color(0xFF14110C)
+val CalmLightMuted = Color(0xFF6B6558)
+val CalmLightSubtle = Color(0xFF8A8575)
+val CalmLightAccent = Color(0xFF2F6A4B)
+val CalmLightAccentSoft = Color(0xFFDFEAD9)
+val CalmLightDanger = Color(0xFFA4432A)
+val CalmLightWarn = Color(0xFF9A7527)
+val CalmLightChip = Color(0xFFF0EBDE)
+
+val CalmDarkBackground = Color(0xFF12120F)
+val CalmDarkSurface = Color(0xFF1A1A15)
+val CalmDarkSunken = Color(0xFF0C0C0A)
+val CalmDarkBorder = Color(0xFF2B2A24)
+val CalmDarkHairline = Color(0xFF24241E)
+val CalmDarkText = Color(0xFFECE9E0)
+val CalmDarkMuted = Color(0xFF8B867A)
+val CalmDarkSubtle = Color(0xFF6A6557)
+val CalmDarkAccent = Color(0xFF7CBD96)
+val CalmDarkAccentSoft = Color(0xFF1E2A23)
+val CalmDarkDanger = Color(0xFFD07A5F)
+val CalmDarkWarn = Color(0xFFD4A85A)
+val CalmDarkChip = Color(0xFF222018)

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="mayday_primary">#7CBD96</color>
+    <color name="mayday_primary_dark">#1E2A23</color>
+    <color name="mayday_background">#12120F</color>
+    <color name="mayday_surface">#1A1A15</color>
+    <color name="mayday_on_surface">#ECE9E0</color>
+    <color name="mayday_on_surface_variant">#8B867A</color>
+</resources>

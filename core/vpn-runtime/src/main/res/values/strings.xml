@@ -1,0 +1,16 @@
+<resources>
+    <string name="mayday_vpn_channel_name">mayday service</string>
+    <string name="mayday_vpn_channel_description">Foreground channel for the mayday runtime shell.</string>
+    <string name="mayday_vpn_notification_title">mayday</string>
+    <string name="mayday_vpn_notification_text">VPN service is running.</string>
+    <string name="mayday_vpn_notification_idle_title">mayday disconnected</string>
+    <string name="mayday_vpn_notification_idle_text">Tap connect to start the tunnel.</string>
+    <string name="mayday_vpn_action_connect">connect</string>
+    <string name="mayday_vpn_action_disconnect">disconnect</string>
+    <string name="mayday_vpn_tile_label">mayday</string>
+    <string name="mayday_vpn_tile_connected">connected</string>
+    <string name="mayday_vpn_tile_disconnected">disconnected</string>
+    <string name="mayday_vpn_tile_starting">starting</string>
+    <string name="mayday_vpn_tile_stopping">stopping</string>
+    <string name="mayday_vpn_tile_unavailable">permission required</string>
+</resources>
