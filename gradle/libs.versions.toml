@@ -1,11 +1,13 @@
 [versions]
 agp = "9.1.1"
 activity = "1.10.1"
+apkParser = "2.6.10"
 appcompat = "1.7.1"
 composeBom = "2025.02.00"
 coreKtx = "1.16.0"
 coroutines = "1.10.2"
 datastore = "1.1.3"
+dexlib2 = "2.5.2"
 fragment = "1.8.6"
 hilt = "2.59.2"
 junit = "4.13.2"
@@ -23,6 +25,7 @@ androidx-activity = { group = "androidx.activity", name = "activity-ktx", versio
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activity" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
+apk-parser = { group = "net.dongliu", name = "apk-parser", version.ref = "apkParser" }
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
 androidx-compose-foundation = { group = "androidx.compose.foundation", name = "foundation" }
 androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
@@ -32,6 +35,7 @@ androidx-compose-ui-text = { group = "androidx.compose.ui", name = "ui-text" }
 androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
 androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
 androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
+dexlib2 = { group = "org.smali", name = "dexlib2", version.ref = "dexlib2" }
 androidx-fragment = { group = "androidx.fragment", name = "fragment-ktx", version.ref = "fragment" }
 androidx-fragment-compose = { group = "androidx.fragment", name = "fragment-compose", version.ref = "fragment" }
 androidx-hilt-common = { group = "androidx.hilt", name = "hilt-common", version = "1.2.0" }

@@ -14,5 +14,6 @@ local.properties
 **/RULES.md
 **/build/
 **/release/
+**/internalDocs
 /.kekes
 /.kotlin

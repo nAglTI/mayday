@@ -5,4 +5,5 @@ data class UiPreferences(
     val language: AppLanguage = AppLanguage.EN,
     val density: AppDensity = AppDensity.COMFORTABLE,
     val onboardingCompleted: Boolean = false,
+    val hiddenRiskPackages: Set<String> = emptySet(),
 )

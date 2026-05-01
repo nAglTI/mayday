@@ -30,10 +30,14 @@ dependencies {
     implementation(project(":core:model"))
 
     implementation(libs.androidx.core.ktx)
+    implementation(libs.apk.parser)
     implementation(libs.androidx.datastore.preferences)
+    implementation(libs.dexlib2)
     implementation(libs.hilt.android)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.snakeyaml)
 
     ksp(libs.hilt.compiler)
+
+    testImplementation(libs.junit)
 }

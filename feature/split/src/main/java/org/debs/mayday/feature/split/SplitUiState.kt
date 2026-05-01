@@ -11,6 +11,11 @@ data class SplitUiState(
     val selectedPackages: Set<String> = emptySet(),
     val showSystemApps: Boolean = false,
     val appSearchQuery: String = "",
+    val riskDetailsPackageName: String? = null,
+    val isRiskScanRunning: Boolean = false,
+    val scannedRiskApps: Int = 0,
+    val totalRiskApps: Int = 0,
+    val scanningRiskPackageNames: Set<String> = emptySet(),
     val isLoading: Boolean = true,
     val message: String? = null,
 )

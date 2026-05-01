@@ -1,6 +1,10 @@
 package org.debs.mayday.core.designsystem.theme
 
 import org.debs.mayday.core.model.AppLanguage
+import org.debs.mayday.core.model.AppRiskFindingType
+import org.debs.mayday.core.model.AppRiskLevel
+import org.debs.mayday.core.model.AppRiskScanResult
+import org.debs.mayday.core.model.AppRiskSignalStrength
 
 data class MaydayStrings(
     val locale: AppLanguage,
@@ -396,6 +400,196 @@ val MaydayStrings.onboardingTextImportHint: String
         AppLanguage.RU -> "mayday://import/... или YAML / JSON"
         AppLanguage.EN -> "mayday://import/... or YAML / JSON"
     }
+
+val MaydayStrings.vpnRiskScan: String
+    get() = when (locale) {
+        AppLanguage.RU -> "проверка VPN-слежки"
+        AppLanguage.EN -> "VPN tracking check"
+    }
+
+val MaydayStrings.vpnRiskDetails: String
+    get() = when (locale) {
+        AppLanguage.RU -> "признаки риска"
+        AppLanguage.EN -> "risk signals"
+    }
+
+val MaydayStrings.noRiskSignals: String
+    get() = when (locale) {
+        AppLanguage.RU -> "признаков VPN-слежки не найдено"
+        AppLanguage.EN -> "no VPN tracking signals found"
+    }
+
+val MaydayStrings.knownAppGroup: String
+    get() = when (locale) {
+        AppLanguage.RU -> "группа"
+        AppLanguage.EN -> "group"
+    }
+
+val MaydayStrings.openAppSettings: String
+    get() = when (locale) {
+        AppLanguage.RU -> "открыть настройки"
+        AppLanguage.EN -> "open settings"
+    }
+
+val MaydayStrings.openAppPermissions: String
+    get() = when (locale) {
+        AppLanguage.RU -> "разрешения"
+        AppLanguage.EN -> "permissions"
+    }
+
+val MaydayStrings.suggestUninstall: String
+    get() = when (locale) {
+        AppLanguage.RU -> "предложить удалить"
+        AppLanguage.EN -> "suggest uninstall"
+    }
+
+val MaydayStrings.hideRiskWarning: String
+    get() = when (locale) {
+        AppLanguage.RU -> "скрыть предупреждение"
+        AppLanguage.EN -> "hide warning"
+    }
+
+val MaydayStrings.warningHidden: String
+    get() = when (locale) {
+        AppLanguage.RU -> "предупреждение скрыто"
+        AppLanguage.EN -> "warning hidden"
+    }
+
+val MaydayStrings.systemAppNotChecked: String
+    get() = when (locale) {
+        AppLanguage.RU -> "системное, не проверяется"
+        AppLanguage.EN -> "system app, not checked"
+    }
+
+val MaydayStrings.pendingRiskScan: String
+    get() = when (locale) {
+        AppLanguage.RU -> "ожидает проверки"
+        AppLanguage.EN -> "waiting for scan"
+    }
+
+val MaydayStrings.checkingRiskScan: String
+    get() = when (locale) {
+        AppLanguage.RU -> "проверяется..."
+        AppLanguage.EN -> "checking..."
+    }
+
+val MaydayStrings.riskScanComplete: String
+    get() = when (locale) {
+        AppLanguage.RU -> "проверка завершена"
+        AppLanguage.EN -> "scan complete"
+    }
+
+val MaydayStrings.restartRiskScan: String
+    get() = when (locale) {
+        AppLanguage.RU -> "перезапустить проверку"
+        AppLanguage.EN -> "restart scan"
+    }
+
+val MaydayStrings.blacklistedAppNotChecked: String
+    get() = when (locale) {
+        AppLanguage.RU -> "в blacklist, не проверяется"
+        AppLanguage.EN -> "blacklisted, not checked"
+    }
+
+fun MaydayStrings.appRiskLabel(result: AppRiskScanResult): String {
+    return when (locale) {
+        AppLanguage.RU -> when (result.riskLevel) {
+            AppRiskLevel.CRITICAL -> "критично"
+            AppRiskLevel.HIGH -> "высокий риск"
+            AppRiskLevel.MEDIUM -> "подозрительно"
+            AppRiskLevel.LOW -> "без предупреждения"
+            AppRiskLevel.CLEAN -> "без признаков"
+        }
+        AppLanguage.EN -> when (result.riskLevel) {
+            AppRiskLevel.CRITICAL -> "critical"
+            AppRiskLevel.HIGH -> "high risk"
+            AppRiskLevel.MEDIUM -> "suspicious"
+            AppRiskLevel.LOW -> "no warning"
+            AppRiskLevel.CLEAN -> "clean"
+        }
+    }
+}
+
+fun MaydayStrings.appRiskSummary(result: AppRiskScanResult): String {
+    return when (locale) {
+        AppLanguage.RU -> when (result.riskLevel) {
+            AppRiskLevel.CRITICAL -> "Найден прямой VPN-детект вместе с признаками отправки или блокировки VPN-статуса."
+            AppRiskLevel.HIGH -> "Найдена проверяемая связка прямого детекта VPN, Tor, proxy или VPN-приложений."
+            AppRiskLevel.MEDIUM -> "Есть ограниченные признаки риска без достаточной связки для высокого уровня."
+            AppRiskLevel.LOW -> "Есть только слабые диагностические признаки без предупреждения."
+            AppRiskLevel.CLEAN -> noRiskSignals
+        }
+        AppLanguage.EN -> when (result.riskLevel) {
+            AppRiskLevel.CRITICAL -> "Direct VPN detection was found together with VPN-status export or blocking signals."
+            AppRiskLevel.HIGH -> "A verifiable direct VPN, Tor, proxy, or VPN-app detection pattern was found."
+            AppRiskLevel.MEDIUM -> "Limited risk signals were found without enough correlation for high risk."
+            AppRiskLevel.LOW -> "Only weak diagnostic signals were found, with no warning."
+            AppRiskLevel.CLEAN -> noRiskSignals
+        }
+    }
+}
+
+fun MaydayStrings.appRiskFindingType(type: AppRiskFindingType): String {
+    return when (locale) {
+        AppLanguage.RU -> when (type) {
+            AppRiskFindingType.ANDROID_API -> "Android API"
+            AppRiskFindingType.NETWORK_INTERFACE -> "сетевые интерфейсы"
+            AppRiskFindingType.PROXY -> "proxy"
+            AppRiskFindingType.LINUX_PROC -> "сетевые таблицы"
+            AppRiskFindingType.VPN_APP_DISCOVERY -> "поиск VPN-приложений"
+            AppRiskFindingType.TOR -> "Tor"
+            AppRiskFindingType.TELEMETRY -> "телеметрия"
+            AppRiskFindingType.PACKAGE_VISIBILITY -> "список приложений"
+            AppRiskFindingType.NETWORK_PERMISSION -> "сетевое разрешение"
+            AppRiskFindingType.ROUTING -> "маршрутизация"
+            AppRiskFindingType.DNS -> "DNS"
+            AppRiskFindingType.LOCAL_PROXY -> "локальный proxy"
+            AppRiskFindingType.XRAY_API -> "Xray API"
+            AppRiskFindingType.CLASH_API -> "Clash API"
+            AppRiskFindingType.PUBLIC_IP -> "публичный IP"
+            AppRiskFindingType.BYPASS -> "обход маршрутизации"
+            AppRiskFindingType.ACTIVE_VPN -> "активный VPN"
+            AppRiskFindingType.COMBINED -> "связка признаков"
+            AppRiskFindingType.NETWORK_LIBRARY -> "сетевая библиотека"
+        }
+        AppLanguage.EN -> when (type) {
+            AppRiskFindingType.ANDROID_API -> "Android API"
+            AppRiskFindingType.NETWORK_INTERFACE -> "network interfaces"
+            AppRiskFindingType.PROXY -> "proxy"
+            AppRiskFindingType.LINUX_PROC -> "network tables"
+            AppRiskFindingType.VPN_APP_DISCOVERY -> "VPN app discovery"
+            AppRiskFindingType.TOR -> "Tor"
+            AppRiskFindingType.TELEMETRY -> "telemetry"
+            AppRiskFindingType.PACKAGE_VISIBILITY -> "app visibility"
+            AppRiskFindingType.NETWORK_PERMISSION -> "network permission"
+            AppRiskFindingType.ROUTING -> "routing"
+            AppRiskFindingType.DNS -> "DNS"
+            AppRiskFindingType.LOCAL_PROXY -> "local proxy"
+            AppRiskFindingType.XRAY_API -> "Xray API"
+            AppRiskFindingType.CLASH_API -> "Clash API"
+            AppRiskFindingType.PUBLIC_IP -> "public IP"
+            AppRiskFindingType.BYPASS -> "routing bypass"
+            AppRiskFindingType.ACTIVE_VPN -> "active VPN"
+            AppRiskFindingType.COMBINED -> "combined signals"
+            AppRiskFindingType.NETWORK_LIBRARY -> "network library"
+        }
+    }
+}
+
+fun MaydayStrings.appRiskSignalStrength(strength: AppRiskSignalStrength): String {
+    return when (locale) {
+        AppLanguage.RU -> when (strength) {
+            AppRiskSignalStrength.LOW -> "слабый"
+            AppRiskSignalStrength.MEDIUM -> "средний"
+            AppRiskSignalStrength.HIGH -> "сильный"
+        }
+        AppLanguage.EN -> when (strength) {
+            AppRiskSignalStrength.LOW -> "low"
+            AppRiskSignalStrength.MEDIUM -> "medium"
+            AppRiskSignalStrength.HIGH -> "high"
+        }
+    }
+}
 
 private fun russianServers(count: Int): String {
     val mod10 = count % 10

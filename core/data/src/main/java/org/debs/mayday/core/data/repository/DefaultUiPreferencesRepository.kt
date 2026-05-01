@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -41,6 +42,7 @@ class DefaultUiPreferencesRepository @Inject constructor(
                     preferences[DENSITY] ?: AppDensity.COMFORTABLE.ordinal,
                 ) { AppDensity.COMFORTABLE },
                 onboardingCompleted = preferences[ONBOARDING_COMPLETED] ?: false,
+                hiddenRiskPackages = preferences[HIDDEN_RISK_PACKAGES].orEmpty(),
             )
         }
         .stateIn(
@@ -73,12 +75,26 @@ class DefaultUiPreferencesRepository @Inject constructor(
         }
     }
 
+    override suspend fun setRiskWarningHidden(packageName: String, hidden: Boolean) {
+        val normalizedPackageName = packageName.trim()
+        if (normalizedPackageName.isBlank()) return
+        dataStore.edit { preferences ->
+            val current = preferences[HIDDEN_RISK_PACKAGES].orEmpty()
+            preferences[HIDDEN_RISK_PACKAGES] = if (hidden) {
+                current + normalizedPackageName
+            } else {
+                current - normalizedPackageName
+            }
+        }
+    }
+
     private companion object {
         val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val THEME_MODE = intPreferencesKey("ui_theme_mode")
         val LANGUAGE = intPreferencesKey("ui_language")
         val DENSITY = intPreferencesKey("ui_density")
         val ONBOARDING_COMPLETED = booleanPreferencesKey("ui_onboarding_completed")
+        val HIDDEN_RISK_PACKAGES = stringSetPreferencesKey("ui_hidden_risk_packages")
 
         fun resolveSystemLanguage(context: Context): AppLanguage {
             val language = context.resources.configuration.locales[0]?.language.orEmpty()
