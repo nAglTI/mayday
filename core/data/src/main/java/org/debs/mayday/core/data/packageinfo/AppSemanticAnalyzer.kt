@@ -4,10 +4,12 @@ import net.dongliu.apk.parser.ApkFile
 import org.debs.mayday.core.model.AppRiskLevel
 import org.debs.mayday.core.model.AppSemanticAnalysisResult
 import org.debs.mayday.core.model.AppSemanticEvidenceSource
+import org.debs.mayday.core.model.AppSemanticProofLevel
 import org.debs.mayday.core.model.AppSemanticRiskBucket
 import org.debs.mayday.core.model.AppSemanticRiskScope
 import org.debs.mayday.core.model.AppSemanticSignal
 import org.debs.mayday.core.model.AppSemanticSignalType
+import org.debs.mayday.core.model.AppSemanticVerdictConfidence
 import org.jf.dexlib2.Opcodes
 import org.jf.dexlib2.dexbacked.DexBackedDexFile
 import org.jf.dexlib2.iface.instruction.FiveRegisterInstruction
@@ -63,7 +65,8 @@ class AppSemanticAnalyzer @Inject constructor() {
                 "${signal.scope}:${signal.source}:${signal.type}:${signal.title}:${signal.evidenceChain.joinToString("|")}"
             }
             .sortedWith(
-                compareByDescending<AppSemanticSignal> { it.confidence }
+                compareByDescending<AppSemanticSignal> { it.proofConfidence }
+                    .thenByDescending { it.confidence }
                     .thenBy { it.scope.name }
                     .thenBy { it.type.name }
                     .thenBy { it.title },
@@ -82,10 +85,17 @@ class AppSemanticAnalyzer @Inject constructor() {
             manifestBucket.score,
             crossLayerBucket.score,
         ).maxOrNull() ?: 0
+        val proofConfidence = proofConfidenceFor(signals)
+        val riskLevel = riskLevelFor(score, signals)
+        val verdictConfidence = AppSemanticVerdictConfidence.from(
+            score = score,
+            riskLevel = riskLevel,
+            threatProofConfidence = proofConfidence,
+        )
 
         return AppSemanticAnalysisResult(
             score = score,
-            riskLevel = riskLevelFor(score, signals),
+            riskLevel = riskLevel,
             signals = signals,
             appCodeRisk = appBucket,
             sdkCodeRisk = sdkBucket,
@@ -97,6 +107,15 @@ class AppSemanticAnalyzer @Inject constructor() {
             cfgEdgeCount = summary.cfgEdgeCount,
             dfgEdgeCount = summary.dfgEdgeCount,
             scannedAtEpochMillis = System.currentTimeMillis(),
+            proofConfidence = proofConfidence,
+            proofLevel = AppSemanticProofLevel.from(proofConfidence),
+            verdictConfidence = verdictConfidence,
+            verdictLevel = AppSemanticProofLevel.from(verdictConfidence),
+            verdictStatus = AppSemanticVerdictConfidence.statusFor(
+                score = score,
+                riskLevel = riskLevel,
+                threatProofConfidence = proofConfidence,
+            ),
         )
     }
 
@@ -228,9 +247,32 @@ class AppSemanticAnalyzer @Inject constructor() {
                 if (methodIndex % CANCELLATION_CHECK_METHOD_INTERVAL == 0) {
                     cancellationCheck()
                 }
-                val implementation = method.implementation ?: return@forEachIndexed
-                val methodName = "${method.name}${method.parameterTypes.joinToString(prefix = "(", postfix = ")")}"
+                val methodName = methodNameWithParameters(method.name, method.parameterTypes)
                 val evidence = "$evidencePrefix:$className#${method.name}"
+                if (method.isNativeDeclaration()) {
+                    summary.addNativeBridgeCandidate(
+                        NativeBridgeCandidate(
+                            scope = scope,
+                            source = source,
+                            className = className,
+                            methodName = methodName,
+                            simpleMethodName = method.name,
+                            evidence = "$evidence -> native declaration",
+                        ),
+                    )
+                    summary.addFact(
+                        fact(
+                            kind = SemanticFactKind.NATIVE_METHOD_DECLARATION,
+                            scope = scope,
+                            source = source,
+                            evidence = "$evidence -> native declaration",
+                            value = method.name,
+                            className = className,
+                            methodName = methodName,
+                        ),
+                    )
+                }
+                val implementation = method.implementation ?: return@forEachIndexed
                 val semantics = analyzeMethod(
                     evidence = evidence,
                     className = className,
@@ -246,6 +288,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                 summary.cfgEdgeCount += semantics.cfgEdges
                 summary.dfgEdgeCount += semantics.dfgEdges
                 semantics.facts.forEach(summary::addFact)
+                semantics.calls.forEach(summary::addMethodCall)
             }
         }
     }
@@ -257,13 +300,17 @@ class AppSemanticAnalyzer @Inject constructor() {
         cancellationCheck: () -> Unit,
     ) {
         cancellationCheck()
-        extractAsciiStrings(input.readBytes()).forEachIndexed { index, value ->
+        val libraryName = nativeLibraryName(evidencePrefix)
+        val bytes = input.readBytes()
+        extractAsciiStrings(bytes).forEachIndexed { index, value ->
             if (index % CANCELLATION_CHECK_NATIVE_STRING_INTERVAL == 0) {
                 cancellationCheck()
             }
+            summary.addNativeLibraryText(libraryName, evidencePrefix, value)
             scanNativeText(
                 value = value,
                 evidence = "$evidencePrefix -> $value",
+                libraryName = libraryName,
                 summary = summary,
             )
         }
@@ -272,6 +319,7 @@ class AppSemanticAnalyzer @Inject constructor() {
     private fun scanNativeText(
         value: String,
         evidence: String,
+        libraryName: String,
         summary: MutableSemanticSummary,
     ) {
         val fact = when {
@@ -279,21 +327,24 @@ class AppSemanticAnalyzer @Inject constructor() {
             value == "SO_BINDTODEVICE" || value.contains("bindSocket", ignoreCase = true) -> {
                 SemanticFactKind.NETWORK_BYPASS_BINDING
             }
+            isProcRouteText(value) -> SemanticFactKind.ROUTE_TABLE_INSPECTION
             value.contains("/proc/net/") || value.contains("/proc/self/net/") -> SemanticFactKind.PROC_SOCKET_TABLE
             isTunnelInterfaceText(value) -> SemanticFactKind.TUNNEL_INTERFACE_PROBE
             isPublicIpEndpoint(value) -> SemanticFactKind.PUBLIC_IP_PROBE
+            isSystemProxyPropertyText(value) -> SemanticFactKind.SYSTEM_PROXY_INSPECTION
             isSocksOrLocalProxyText(value) -> SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE
             else -> null
         } ?: return
-        summary.addFact(
-            SemanticFact(
-                kind = fact,
-                scope = AppSemanticRiskScope.NATIVE_CODE,
-                source = AppSemanticEvidenceSource.NATIVE,
-                evidence = evidence,
-                value = value,
-            ),
+        val semanticFact = SemanticFact(
+            kind = fact,
+            scope = AppSemanticRiskScope.NATIVE_CODE,
+            source = AppSemanticEvidenceSource.NATIVE,
+            evidence = evidence,
+            value = value,
+            className = libraryName,
         )
+        summary.addFact(semanticFact)
+        summary.addNativeLibraryFact(libraryName, semanticFact)
     }
 
     private fun analyzeMethod(
@@ -314,6 +365,7 @@ class AppSemanticAnalyzer @Inject constructor() {
         var pendingResultTags = emptySet<DataTag>()
         var dfgEdges = 0
         var branchCount = 0
+        val methodCalls = mutableListOf<MethodCall>()
 
         fun addFact(
             kind: SemanticFactKind,
@@ -330,6 +382,13 @@ class AppSemanticAnalyzer @Inject constructor() {
                 methodName = methodName,
             )
         }
+
+        scanMethodContext(
+            className = className,
+            methodName = methodName,
+            evidence = evidence,
+            addFact = ::addFact,
+        )
 
         fun tagRegister(
             register: Int,
@@ -409,6 +468,17 @@ class AppSemanticAnalyzer @Inject constructor() {
                 val argumentStrings = argumentRegisters.mapNotNull(registerStrings::get)
                 val argumentInts = argumentRegisters.mapNotNull(registerInts::get)
                 if (invokedMethod != null) {
+                    val targetClass = dexTypeName(invokedMethod.definingClass)
+                    if (targetClass.isNotBlank() && !PLATFORM_CLASS_PREFIXES.any { prefix -> targetClass.startsWith(prefix) }) {
+                        methodCalls += MethodCall(
+                            callerScope = scope,
+                            source = source,
+                            callerClass = className,
+                            callerMethod = methodName,
+                            targetClass = targetClass,
+                            targetMethod = methodNameWithParameters(invokedMethod.name, invokedMethod.parameterTypes),
+                        )
+                    }
                     val invokeSemantics = handleInvoke(
                         method = invokedMethod,
                         packageName = packageName,
@@ -476,6 +546,7 @@ class AppSemanticAnalyzer @Inject constructor() {
             cfgEdges = cfg.edges,
             dfgEdges = dfgEdges,
             facts = facts,
+            calls = methodCalls,
         )
     }
 
@@ -492,6 +563,9 @@ class AppSemanticAnalyzer @Inject constructor() {
                 scanType(reference.definingClass, evidence, addFact)
                 scanText(reference.name, evidence, addFact, allowTunnelInterface = false)
                 scanType(reference.type, evidence, addFact)
+                if (isDeviceIdentifierField(reference.definingClass, reference.name)) {
+                    addFact(SemanticFactKind.DEVICE_IDENTIFIER_COLLECTION, "$evidence -> ${reference.definingClass}->${reference.name}", reference.name)
+                }
                 if (reference.definingClass == "Landroid/net/VpnService;" && reference.name == "SERVICE_INTERFACE") {
                     addFact(SemanticFactKind.VPN_SERVICE_ACTION, "$evidence -> VpnService.SERVICE_INTERFACE", "VpnService.SERVICE_INTERFACE")
                     tagRegister(DataTag.VPN_SERVICE_ACTION)
@@ -524,9 +598,67 @@ class AppSemanticAnalyzer @Inject constructor() {
         val hasPublicIpArgument = argumentStrings.any(::isPublicIpEndpoint)
         val hasTelemetryPayloadArgument = DataTag.VPN_TELEMETRY_PAYLOAD in argumentTags
         val hasVpnTelemetryKeyArgument = DataTag.VPN_TELEMETRY_VALUE in argumentTags
+        val hasLocalProxyArgument = DataTag.LOCAL_PROXY_ENDPOINT in argumentTags ||
+            argumentStrings.any(::isSocksOrLocalProxyText)
         val isNetworkTransportCall = (hasVpnDataArgument || hasPublicIpArgument || hasTelemetryPayloadArgument) &&
             method.isNetworkTransportCall()
         val isSdkCall = callerScope == AppSemanticRiskScope.APP_CODE && isSdkBoundaryCall(className, packageName)
+        val isTelemetrySink = isTelemetrySinkCall(
+            className = className,
+            methodName = name,
+            hasTrackedPayload = hasVpnDataArgument || hasTelemetryPayloadArgument || hasVpnTelemetryKeyArgument,
+        )
+
+        if (
+            isVpnClientControlCall(className, name) ||
+            (isVpnLaunchCall(className, name) && DataTag.VPN_INTENT in argumentTags)
+        ) {
+            addFact(SemanticFactKind.VPN_CLIENT_CONTROL_CONTEXT, "$evidence -> $signature", signature)
+            if (isSplitTunnelVpnBuilderCall(className, name)) {
+                addFact(SemanticFactKind.SPLIT_TUNNEL_APP_SELECTION, "$evidence -> $signature", signature)
+            }
+        }
+
+        if (className == "java.lang.System" && name == "getProperty" && argumentStrings.any(::isSystemProxyPropertyText)) {
+            addFact(SemanticFactKind.SYSTEM_PROXY_INSPECTION, "$evidence -> $signature", signature)
+            resultTags += DataTag.LOCAL_PROXY_ENDPOINT
+            dfgEdges += 1
+        }
+
+        if (className == "java.lang.System" && name in NATIVE_LIBRARY_LOAD_METHODS) {
+            argumentStrings
+                .mapNotNull { value -> nativeLoadLibraryName(name, value) }
+                .forEach { libraryName ->
+                    addFact(SemanticFactKind.NATIVE_LIBRARY_LOAD, "$evidence -> $signature($libraryName)", libraryName)
+                }
+        }
+
+        if (isSelfProxyUseCall(className, name) || (argumentStrings.any(::isSelfProxyText) && name != "getProperty")) {
+            addFact(SemanticFactKind.LOCAL_PROXY_SELF_USE_CONTEXT, "$evidence -> $signature", signature)
+        }
+
+        if (
+            isLocalProxyScanText(name) ||
+            isLocalProxyScanText(className) ||
+            (hasLocalProxyArgument && name.contains("probe", ignoreCase = true))
+        ) {
+            addFact(SemanticFactKind.LOCAL_PROXY_SCAN_CONTEXT, "$evidence -> $signature", signature)
+        }
+
+        if (className == "android.content.Context" && name == "getPackageName") {
+            resultTags += DataTag.SELF_PACKAGE_NAME
+        }
+
+        if (className == "android.content.Intent" && name == "setPackage") {
+            if (DataTag.VPN_INTENT in argumentTags && DataTag.SELF_PACKAGE_NAME in argumentTags) {
+                argumentRegisters.firstOrNull()?.let { register ->
+                    tagRegister(register, arrayOf(DataTag.SELF_SCOPED_VPN_INTENT))
+                }
+                resultTags += DataTag.SELF_SCOPED_VPN_INTENT
+                dfgEdges += 1
+                addFact(SemanticFactKind.SELF_PACKAGE_SCOPED_VPN_QUERY, "$evidence -> $signature", signature)
+            }
+        }
 
         if (className == "android.content.Intent" && (name == "<init>" || name == "setAction")) {
             if (DataTag.VPN_SERVICE_ACTION in argumentTags || argumentStrings.any(::isVpnServiceAction)) {
@@ -545,9 +677,13 @@ class AppSemanticAnalyzer @Inject constructor() {
                 DataTag.VPN_SERVICE_ACTION in argumentTags ||
                 argumentStrings.any(::isVpnServiceAction)
             ) {
-                addFact(SemanticFactKind.PACKAGE_QUERY_VPN_SERVICE, "$evidence -> $signature", signature)
-                resultTags += DataTag.VPN_QUERY_RESULT
-                dfgEdges += 1
+                if (DataTag.SELF_SCOPED_VPN_INTENT in argumentTags) {
+                    addFact(SemanticFactKind.SELF_PACKAGE_SCOPED_VPN_QUERY, "$evidence -> $signature", signature)
+                } else {
+                    addFact(SemanticFactKind.PACKAGE_QUERY_VPN_SERVICE, "$evidence -> $signature", signature)
+                    resultTags += DataTag.VPN_QUERY_RESULT
+                    dfgEdges += 1
+                }
             }
         }
 
@@ -557,7 +693,7 @@ class AppSemanticAnalyzer @Inject constructor() {
             dfgEdges += 1
         }
 
-        if (className == "android.content.pm.PackageManager" && name == "getPackageInfo") {
+        if (className == "android.content.pm.PackageManager" && name in PACKAGE_NAME_QUERY_METHODS) {
             addFact(SemanticFactKind.PACKAGE_QUERY_API, "$evidence -> $signature", signature)
             if (DataTag.KNOWN_VPN_PACKAGE in argumentTags || argumentStrings.any { it in AppRiskRules.vpnClientPackageNames }) {
                 addFact(SemanticFactKind.KNOWN_VPN_PACKAGE_CHECK, "$evidence -> $signature", signature)
@@ -601,6 +737,16 @@ class AppSemanticAnalyzer @Inject constructor() {
             }
         }
 
+        if (
+            (name in SERIALIZATION_METHODS || className in SERIALIZATION_CLASSES) &&
+            (hasVpnTelemetryKeyArgument || hasVpnDataArgument)
+        ) {
+            addFact(SemanticFactKind.TELEMETRY_PREPARATION, "$evidence -> $signature", signature)
+            addFact(SemanticFactKind.VPN_DATA_SERIALIZATION_FLOW, "$evidence -> $signature", signature)
+            resultTags += DataTag.VPN_TELEMETRY_PAYLOAD
+            dfgEdges += 1
+        }
+
         if (isSdkCall && hasVpnDataArgument) {
             addFact(SemanticFactKind.VPN_DATA_SDK_HANDOFF, "$evidence -> $signature", signature)
             dfgEdges += 2
@@ -615,7 +761,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                     addFact(SemanticFactKind.VPN_DATA_NETWORK_FLOW, "$evidence -> $signature", signature)
                     dfgEdges += 2
                 }
-                isSdkCall || name in TELEMETRY_METHOD_NAMES || className in TELEMETRY_CLASS_NAMES -> {
+                isSdkCall || isTelemetrySink -> {
                     addFact(SemanticFactKind.TELEMETRY_OR_NETWORK_SINK, "$evidence -> $signature", signature)
                     dfgEdges += 1
                     if (isSdkCall) {
@@ -629,9 +775,11 @@ class AppSemanticAnalyzer @Inject constructor() {
         if (isNetworkTransportCall) {
             addFact(SemanticFactKind.NETWORK_LIBRARY_CALL, "$evidence -> $signature", signature)
         }
-        if ((name in TELEMETRY_METHOD_NAMES || className in TELEMETRY_CLASS_NAMES) && hasVpnDataArgument) {
+        if (isTelemetrySink && name != "<init>") {
             addFact(SemanticFactKind.TELEMETRY_OR_NETWORK_SINK, "$evidence -> $signature", signature)
-            dfgEdges += 1
+            if (hasVpnDataArgument) {
+                dfgEdges += 1
+            }
         }
 
         if (
@@ -644,14 +792,52 @@ class AppSemanticAnalyzer @Inject constructor() {
         ) {
             addFact(SemanticFactKind.NETWORK_CAPABILITIES_VPN_CHECK, "$evidence -> $signature", signature)
         }
+        if (
+            className == "android.net.NetworkCapabilities" &&
+            name == "hasCapability" &&
+            (
+                NOT_VPN_CAPABILITY_ID in argumentInts ||
+                    argumentStrings.any { it == "NET_CAPABILITY_NOT_VPN" || it == "NetworkCapabilities.NET_CAPABILITY_NOT_VPN" }
+                )
+        ) {
+            addFact(SemanticFactKind.NETWORK_CAPABILITIES_VPN_CHECK, "$evidence -> $signature", signature)
+        }
         if (className == "java.net.NetworkInterface" && name == "getNetworkInterfaces") {
             addFact(SemanticFactKind.TUNNEL_INTERFACE_API, "$evidence -> $signature", signature)
         }
         if (className == "java.net.NetworkInterface" && name == "getMTU") {
             addFact(SemanticFactKind.MTU_PROBE, "$evidence -> $signature", signature)
         }
+        if (className == "android.net.LinkProperties" && name == "getDnsServers") {
+            addFact(SemanticFactKind.DNS_SERVER_INSPECTION, "$evidence -> $signature", signature)
+        }
+        if (
+            (className == "android.net.LinkProperties" && name in ROUTE_INSPECTION_METHODS) ||
+            (className == "android.net.ConnectivityManager" && name == "getLinkProperties")
+        ) {
+            addFact(SemanticFactKind.ROUTE_TABLE_INSPECTION, "$evidence -> $signature", signature)
+        }
+        if (isSystemProxyInspectionCall(className, name)) {
+            addFact(SemanticFactKind.SYSTEM_PROXY_INSPECTION, "$evidence -> $signature", signature)
+            if (isSystemProxyValueCall(className, name)) {
+                resultTags += DataTag.LOCAL_PROXY_ENDPOINT
+                dfgEdges += 1
+            }
+        }
         if (className == "android.net.ConnectivityManager" && name == "getAllNetworks") {
             addFact(SemanticFactKind.UNDERLYING_NETWORK_ENUMERATION, "$evidence -> $signature", signature)
+        }
+        if (isDeviceIdentifierCollectionCall(className, name)) {
+            addFact(SemanticFactKind.DEVICE_IDENTIFIER_COLLECTION, "$evidence -> $signature", signature)
+            resultTags += DataTag.DEVICE_FINGERPRINT_VALUE
+        }
+        if (isNetworkFingerprintCollectionCall(className, name)) {
+            addFact(SemanticFactKind.NETWORK_FINGERPRINT_COLLECTION, "$evidence -> $signature", signature)
+            resultTags += DataTag.DEVICE_FINGERPRINT_VALUE
+        }
+        if (isUsageStatsCollectionCall(className, name)) {
+            addFact(SemanticFactKind.USAGE_STATS_COLLECTION, "$evidence -> $signature", signature)
+            resultTags += DataTag.DEVICE_FINGERPRINT_VALUE
         }
         if (
             (className == "android.net.ConnectivityManager" && name in CONNECTIVITY_BINDING_METHODS) ||
@@ -667,10 +853,7 @@ class AppSemanticAnalyzer @Inject constructor() {
 
         if (
             method.isSocketConnectCall() &&
-            (
-                DataTag.LOCAL_PROXY_ENDPOINT in argumentTags ||
-                    argumentStrings.any(::isSocksOrLocalProxyText)
-                )
+            hasLocalProxyArgument
         ) {
             addFact(SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE, "$evidence -> $signature", signature)
             dfgEdges += 1
@@ -680,6 +863,28 @@ class AppSemanticAnalyzer @Inject constructor() {
             resultTags = resultTags,
             dfgEdges = dfgEdges,
         )
+    }
+
+    private fun scanMethodContext(
+        className: String,
+        methodName: String,
+        evidence: String,
+        addFact: (SemanticFactKind, String, String) -> Unit,
+    ) {
+        val methodToken = methodName.substringBefore("(")
+        listOf(className, methodToken).forEach { value ->
+            when {
+                isSplitTunnelText(value) -> {
+                    addFact(SemanticFactKind.SPLIT_TUNNEL_APP_SELECTION, "$evidence -> $value", value)
+                }
+                isLocalProxyScanText(value) -> {
+                    addFact(SemanticFactKind.LOCAL_PROXY_SCAN_CONTEXT, "$evidence -> $value", value)
+                }
+                isSelfProxyText(value) -> {
+                    addFact(SemanticFactKind.LOCAL_PROXY_SELF_USE_CONTEXT, "$evidence -> $value", value)
+                }
+            }
+        }
     }
 
     private fun scanText(
@@ -692,9 +897,22 @@ class AppSemanticAnalyzer @Inject constructor() {
         when {
             isVpnServiceAction(value) -> addFact(SemanticFactKind.VPN_SERVICE_ACTION, "$evidence -> $value", value)
             value in AppRiskRules.vpnClientPackageNames -> addFact(SemanticFactKind.KNOWN_VPN_PACKAGE_REFERENCE, "$evidence -> $value", value)
+            isDeviceIdentifierText(value) -> addFact(SemanticFactKind.DEVICE_IDENTIFIER_COLLECTION, "$evidence -> $value", value)
+            isNetworkFingerprintText(value) -> addFact(SemanticFactKind.NETWORK_FINGERPRINT_COLLECTION, "$evidence -> $value", value)
             isPublicIpEndpoint(value) -> addFact(SemanticFactKind.PUBLIC_IP_PROBE, "$evidence -> $value", value)
             isVpnTelemetryText(value) -> addFact(SemanticFactKind.VPN_TELEMETRY_LABEL, "$evidence -> $value", value)
-            isSocksOrLocalProxyText(value) -> addFact(SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE, "$evidence -> $value", value)
+            isSplitTunnelText(value) -> addFact(SemanticFactKind.SPLIT_TUNNEL_APP_SELECTION, "$evidence -> $value", value)
+            isLocalProxyScanText(value) -> addFact(SemanticFactKind.LOCAL_PROXY_SCAN_CONTEXT, "$evidence -> $value", value)
+            isSelfProxyText(value) -> addFact(SemanticFactKind.LOCAL_PROXY_SELF_USE_CONTEXT, "$evidence -> $value", value)
+            isSystemProxyPropertyText(value) -> {
+                addFact(SemanticFactKind.SYSTEM_PROXY_INSPECTION, "$evidence -> $value", value)
+            }
+            isSocksOrLocalProxyText(value) -> {
+                addFact(SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE, "$evidence -> $value", value)
+            }
+            isProcRouteText(value) -> {
+                addFact(SemanticFactKind.ROUTE_TABLE_INSPECTION, "$evidence -> $value", value)
+            }
             value.startsWith("/proc/net/") || value.startsWith("/proc/self/net/") -> {
                 addFact(SemanticFactKind.PROC_SOCKET_TABLE, "$evidence -> $value", value)
             }
@@ -740,7 +958,13 @@ class AppSemanticAnalyzer @Inject constructor() {
         val signals = mutableListOf<AppSemanticSignal>()
         val facts = summary.facts
 
-        facts.groupBy { MethodGroup(it.scope, it.source, it.className, it.methodName) }
+        facts
+            .filter {
+                it.className.isNotBlank() &&
+                    it.methodName.isNotBlank() &&
+                    it.scope != AppSemanticRiskScope.NATIVE_CODE
+            }
+            .groupBy { MethodGroup(it.scope, it.source, it.className, it.methodName) }
             .forEach { (group, groupFacts) ->
                 signals += buildGroupSignals(
                     facts = groupFacts,
@@ -751,7 +975,7 @@ class AppSemanticAnalyzer @Inject constructor() {
             }
 
         facts
-            .filter { it.className.isNotBlank() }
+            .filter { it.className.isNotBlank() && it.scope != AppSemanticRiskScope.NATIVE_CODE }
             .groupBy { ClassGroup(it.scope, it.source, it.className) }
             .forEach { (group, groupFacts) ->
                 signals += buildGroupSignals(
@@ -762,17 +986,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                 )
             }
 
-        facts
-            .filter { it.scope == AppSemanticRiskScope.APP_CODE }
-            .groupBy { ScopeGroup(it.scope, it.source) }
-            .forEach { (group, groupFacts) ->
-                signals += buildGroupSignals(
-                    facts = groupFacts,
-                    groupLabel = group.scope.name,
-                    trustedVpnClient = trustedVpnClient,
-                    classLevel = true,
-                )
-            }
+        signals += buildCallGraphSignals(summary, trustedVpnClient)
 
         facts
             .filter { it.scope == AppSemanticRiskScope.MANIFEST || it.scope == AppSemanticRiskScope.NATIVE_CODE }
@@ -787,6 +1001,7 @@ class AppSemanticAnalyzer @Inject constructor() {
             }
 
         signals += buildCrossLayerSignals(facts, trustedVpnClient)
+        signals += buildNativeBridgeSignals(summary, trustedVpnClient)
         if (trustedVpnClient) {
             signals += signal(
                 facts = facts.filter {
@@ -805,6 +1020,174 @@ class AppSemanticAnalyzer @Inject constructor() {
         }
 
         return signals
+    }
+
+    private fun buildCallGraphSignals(
+        summary: MutableSemanticSummary,
+        trustedVpnClient: Boolean,
+    ): List<AppSemanticSignal> {
+        val factsByMethod = summary.facts
+            .filter {
+                it.scope == AppSemanticRiskScope.APP_CODE &&
+                    it.className.isNotBlank() &&
+                    it.methodName.isNotBlank()
+            }
+            .groupBy { fact ->
+                MethodGroup(
+                    scope = fact.scope,
+                    source = fact.source,
+                    className = fact.className,
+                    methodName = fact.methodName,
+                )
+            }
+        if (factsByMethod.isEmpty()) return emptyList()
+
+        val appCalls = summary.methodCalls
+            .filter { call ->
+                call.callerScope == AppSemanticRiskScope.APP_CODE &&
+                    call.targetClass.startsWith(summary.packageName)
+            }
+            .groupBy { call ->
+                MethodGroup(
+                    scope = call.callerScope,
+                    source = call.source,
+                    className = call.callerClass,
+                    methodName = call.callerMethod,
+                )
+            }
+        if (appCalls.isEmpty()) return emptyList()
+
+        val signals = mutableListOf<AppSemanticSignal>()
+        val emittedFactGroups = mutableSetOf<String>()
+        fun factsFor(methods: Set<MethodGroup>): List<SemanticFact> {
+            return methods.flatMap { method -> factsByMethod[method].orEmpty() }.distinct()
+        }
+        fun factGroupKey(methods: Set<MethodGroup>): String {
+            return methods
+                .filter { method -> factsByMethod.containsKey(method) }
+                .sortedWith(compareBy<MethodGroup> { it.className }.thenBy { it.methodName })
+                .joinToString("|") { method -> "${method.className}#${method.methodName}" }
+        }
+        fun addSignalsFor(methods: Set<MethodGroup>) {
+            val groupFacts = factsFor(methods)
+            if (groupFacts.map { "${it.className}#${it.methodName}" }.distinct().size < 2) return
+            val groupKey = factGroupKey(methods)
+            if (groupKey.isBlank() || !emittedFactGroups.add(groupKey)) return
+            signals += buildGroupSignals(
+                facts = groupFacts,
+                groupLabel = "app call graph",
+                trustedVpnClient = trustedVpnClient,
+                classLevel = false,
+                allowLoosePackageApi = false,
+            )
+        }
+
+        appCalls.forEach { (caller, calls) ->
+            calls.forEach { call ->
+                val target = MethodGroup(
+                    scope = AppSemanticRiskScope.APP_CODE,
+                    source = AppSemanticEvidenceSource.DIRECT_APP_CODE,
+                    className = call.targetClass,
+                    methodName = call.targetMethod,
+                )
+                addSignalsFor(setOf(caller, target))
+            }
+
+            if (
+                calls.size <= MAX_CALL_GRAPH_SIBLING_FANOUT &&
+                isCallGraphCoordinatorCandidate(caller, factsByMethod)
+            ) {
+                val siblingMethods = buildSet {
+                    add(caller)
+                    calls.forEach { call ->
+                        add(
+                            MethodGroup(
+                                scope = AppSemanticRiskScope.APP_CODE,
+                                source = AppSemanticEvidenceSource.DIRECT_APP_CODE,
+                                className = call.targetClass,
+                                methodName = call.targetMethod,
+                            ),
+                        )
+                    }
+                }
+                addSignalsFor(siblingMethods)
+            }
+        }
+
+        addBoundedCallChainSignals(
+            appCalls = appCalls,
+            factsByMethod = factsByMethod,
+            addSignalsFor = ::addSignalsFor,
+        )
+
+        return signals
+    }
+
+    private fun isCallGraphCoordinatorCandidate(
+        caller: MethodGroup,
+        factsByMethod: Map<MethodGroup, List<SemanticFact>>,
+    ): Boolean {
+        val callerFacts = factsByMethod[caller].orEmpty()
+        if (callerFacts.any { fact -> fact.kind in CALL_GRAPH_COORDINATOR_FACTS }) return true
+        val callerName = caller.methodName.substringBefore("(")
+        if (CALL_GRAPH_COORDINATOR_METHOD_TERMS.any { term -> callerName.contains(term, ignoreCase = true) }) {
+            return true
+        }
+        return false
+    }
+
+    private fun addBoundedCallChainSignals(
+        appCalls: Map<MethodGroup, List<MethodCall>>,
+        factsByMethod: Map<MethodGroup, List<SemanticFact>>,
+        addSignalsFor: (Set<MethodGroup>) -> Unit,
+    ) {
+        val targetsByCaller = appCalls.mapValues { (_, calls) ->
+            calls
+                .map { call ->
+                    MethodGroup(
+                        scope = AppSemanticRiskScope.APP_CODE,
+                        source = AppSemanticEvidenceSource.DIRECT_APP_CODE,
+                        className = call.targetClass,
+                        methodName = call.targetMethod,
+                    )
+                }
+                .distinct()
+        }
+        val candidateRoots = buildSet {
+            addAll(factsByMethod.keys)
+            targetsByCaller.keys.forEach { caller ->
+                if (isCallGraphCoordinatorCandidate(caller, factsByMethod)) {
+                    add(caller)
+                }
+            }
+        }
+        var exploredEdges = 0
+
+        fun traverse(
+            current: MethodGroup,
+            path: List<MethodGroup>,
+            depth: Int,
+        ) {
+            if (depth >= MAX_CALL_GRAPH_CHAIN_DEPTH || exploredEdges >= MAX_CALL_GRAPH_CHAIN_EDGES) return
+            val targets = targetsByCaller[current].orEmpty()
+            if (targets.isEmpty() || targets.size > MAX_CALL_GRAPH_CHAIN_FANOUT) return
+
+            targets.forEach { target ->
+                if (target in path || exploredEdges >= MAX_CALL_GRAPH_CHAIN_EDGES) return@forEach
+                exploredEdges += 1
+                val nextPath = path + target
+                addSignalsFor(nextPath.toSet())
+                traverse(
+                    current = target,
+                    path = nextPath,
+                    depth = depth + 1,
+                )
+            }
+        }
+
+        candidateRoots
+            .take(MAX_CALL_GRAPH_CHAIN_ROOTS)
+            .forEach { root -> traverse(root, listOf(root), depth = 0) }
     }
 
     private fun buildCrossLayerSignals(
@@ -831,8 +1214,14 @@ class AppSemanticAnalyzer @Inject constructor() {
             relatedSdkFacts.has(SemanticFactKind.TELEMETRY_PREPARATION) ||
             relatedSdkFacts.has(SemanticFactKind.VPN_DATA_SERIALIZATION_FLOW) ||
             relatedSdkFacts.has(SemanticFactKind.VPN_TELEMETRY_LABEL)
-        val hasProxyProbe = appFacts.has(SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE) ||
-            relatedSdkFacts.has(SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE)
+        val hasSelfProxyContext = appFacts.has(SemanticFactKind.LOCAL_PROXY_SELF_USE_CONTEXT) ||
+            relatedSdkFacts.has(SemanticFactKind.LOCAL_PROXY_SELF_USE_CONTEXT)
+        val hasProxyScanContext = appFacts.has(SemanticFactKind.LOCAL_PROXY_SCAN_CONTEXT) ||
+            relatedSdkFacts.has(SemanticFactKind.LOCAL_PROXY_SCAN_CONTEXT)
+        val hasProxyProbe = (
+            appFacts.has(SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE) ||
+                relatedSdkFacts.has(SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE)
+            ) && (!hasSelfProxyContext || hasProxyScanContext)
         val hasPublicIp = appFacts.has(SemanticFactKind.PUBLIC_IP_PROBE) ||
             appFacts.has(SemanticFactKind.PUBLIC_IP_NETWORK_FLOW) ||
             relatedSdkFacts.has(SemanticFactKind.PUBLIC_IP_PROBE) ||
@@ -907,11 +1296,183 @@ class AppSemanticAnalyzer @Inject constructor() {
         }
     }
 
+    private fun buildNativeBridgeSignals(
+        summary: MutableSemanticSummary,
+        trustedVpnClient: Boolean,
+    ): List<AppSemanticSignal> {
+        if (summary.nativeBridgeCandidates.isEmpty() || summary.nativeLibraries.isEmpty()) return emptyList()
+        val appFacts = summary.facts.filter { it.scope == AppSemanticRiskScope.APP_CODE }
+        val loadFacts = appFacts.filter { it.kind == SemanticFactKind.NATIVE_LIBRARY_LOAD }
+        val declarationFacts = appFacts.filter { it.kind == SemanticFactKind.NATIVE_METHOD_DECLARATION }
+        if (declarationFacts.isEmpty() && loadFacts.isEmpty()) return emptyList()
+
+        val factsByMethod = appFacts.groupBy { fact ->
+            MethodGroup(
+                scope = fact.scope,
+                source = fact.source,
+                className = fact.className,
+                methodName = fact.methodName,
+            )
+        }
+        val nativeLibraries = summary.nativeLibraries.values.toList()
+        val signals = mutableListOf<AppSemanticSignal>()
+        val emitted = mutableSetOf<String>()
+
+        summary.nativeBridgeCandidates
+            .asSequence()
+            .filter { candidate -> candidate.scope == AppSemanticRiskScope.APP_CODE }
+            .forEach { candidate ->
+                val jniPrefix = jniSymbolPrefix(candidate.className, candidate.simpleMethodName)
+                val callerFacts = summary.methodCalls
+                    .filter { call ->
+                        call.callerScope == AppSemanticRiskScope.APP_CODE &&
+                            call.targetClass == candidate.className &&
+                            call.targetMethod == candidate.methodName
+                    }
+                    .flatMap { call ->
+                        factsByMethod[
+                            MethodGroup(
+                                scope = AppSemanticRiskScope.APP_CODE,
+                                source = call.source,
+                                className = call.callerClass,
+                                methodName = call.callerMethod,
+                            ),
+                        ].orEmpty()
+                    }
+                val candidateFacts = appFacts.filter { fact ->
+                    fact.className == candidate.className &&
+                        (
+                            fact.methodName == candidate.methodName ||
+                                fact.kind == SemanticFactKind.NATIVE_LIBRARY_LOAD ||
+                                fact.kind in NATIVE_BRIDGE_JAVA_CONTEXT_FACTS
+                            )
+                }
+
+                nativeLibraries.forEach { library ->
+                    val matchingLoadFacts = loadFacts.filter { fact -> library.matchesLoadName(fact.value) }
+                    val hasSameClassLoad = matchingLoadFacts.any { fact -> fact.className == candidate.className }
+                    val hasExactJniSymbol = library.jniSymbolTexts.any { symbol -> symbol.contains(jniPrefix) }
+                    val hasRegisterNativeName = library.hasRegisterNatives &&
+                        library.symbolTexts.any { text -> text == candidate.simpleMethodName }
+                    if (!hasExactJniSymbol && !hasRegisterNativeName && !hasSameClassLoad && matchingLoadFacts.isEmpty()) {
+                        return@forEach
+                    }
+
+                    val nativeFacts = library.facts
+                        .filter { fact -> fact.kind in NATIVE_BRIDGE_NATIVE_FACTS }
+                        .distinct()
+                    if (nativeFacts.isEmpty()) return@forEach
+
+                    val relatedJavaFacts = (
+                        declarationFacts.filter { fact ->
+                            fact.className == candidate.className && fact.methodName == candidate.methodName
+                        } +
+                            matchingLoadFacts +
+                            candidateFacts +
+                            callerFacts
+                        )
+                        .filter { fact ->
+                            fact.kind == SemanticFactKind.NATIVE_METHOD_DECLARATION ||
+                                fact.kind == SemanticFactKind.NATIVE_LIBRARY_LOAD ||
+                                fact.kind in NATIVE_BRIDGE_JAVA_CONTEXT_FACTS
+                        }
+                        .distinct()
+
+                    val hasJavaSuspiciousContext = relatedJavaFacts.any { fact ->
+                        fact.kind in NATIVE_BRIDGE_JAVA_CONTEXT_FACTS
+                    }
+                    val hasNativePublicIp = nativeFacts.has(SemanticFactKind.PUBLIC_IP_PROBE) ||
+                        nativeFacts.has(SemanticFactKind.PUBLIC_IP_NETWORK_FLOW)
+                    val hasNativeProxy = nativeFacts.has(SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE) ||
+                        nativeFacts.has(SemanticFactKind.SYSTEM_PROXY_INSPECTION)
+                    val hasNativeBypass = nativeFacts.has(SemanticFactKind.NETWORK_BYPASS_BINDING)
+                    val hasNativeVpnState = nativeFacts.any { fact ->
+                        fact.kind == SemanticFactKind.TUNNEL_INTERFACE_PROBE ||
+                            fact.kind == SemanticFactKind.TUNNEL_INTERFACE_API ||
+                            fact.kind == SemanticFactKind.MTU_PROBE ||
+                            fact.kind == SemanticFactKind.PROC_SOCKET_TABLE ||
+                            fact.kind == SemanticFactKind.DNS_SERVER_INSPECTION ||
+                            fact.kind == SemanticFactKind.ROUTE_TABLE_INSPECTION ||
+                            fact.kind == SemanticFactKind.NETWORK_CAPABILITIES_VPN_CHECK
+                    }
+                    val nativeContextCount = listOf(
+                        hasNativePublicIp,
+                        hasNativeProxy,
+                        hasNativeBypass,
+                        hasNativeVpnState,
+                    ).count { it }
+                    val hasNativeCompoundContext = nativeContextCount >= 2
+                    val hasNativeActionableCompound =
+                        hasNativePublicIp && (hasNativeProxy || hasNativeBypass || hasNativeVpnState) ||
+                            hasNativeVpnState && (hasNativeProxy || hasNativeBypass)
+                    val bridgeIsStronglyLinked = hasExactJniSymbol || hasRegisterNativeName || hasSameClassLoad
+                    val confidence = when {
+                        trustedVpnClient -> if (hasJavaSuspiciousContext && hasNativeCompoundContext) 20 else 12
+                        hasJavaSuspiciousContext && (hasNativeActionableCompound || hasNativePublicIp) && bridgeIsStronglyLinked -> 58
+                        hasJavaSuspiciousContext && (hasNativeActionableCompound || hasNativePublicIp) -> 52
+                        hasJavaSuspiciousContext -> 45
+                        hasNativeActionableCompound && bridgeIsStronglyLinked -> 40
+                        hasNativeCompoundContext -> 18
+                        else -> 18
+                    }
+                    val proofConfidence = when {
+                        trustedVpnClient -> if (hasJavaSuspiciousContext && hasNativeCompoundContext) 25 else 15
+                        hasJavaSuspiciousContext && (hasNativeActionableCompound || hasNativePublicIp) && bridgeIsStronglyLinked -> 65
+                        hasJavaSuspiciousContext && (hasNativeActionableCompound || hasNativePublicIp) -> 58
+                        hasJavaSuspiciousContext -> 52
+                        hasNativeActionableCompound && bridgeIsStronglyLinked -> 38
+                        hasNativeCompoundContext -> 18
+                        else -> 18
+                    }
+                    val title = when {
+                        hasJavaSuspiciousContext -> "Java-to-native VPN/proxy semantic bridge"
+                        hasNativeActionableCompound -> "native bridge with compound VPN/proxy indicators"
+                        else -> "native bridge with unresolved native indicator"
+                    }
+                    val description = when {
+                        hasJavaSuspiciousContext && (hasNativeActionableCompound || hasNativePublicIp) -> {
+                            "Java code reaches a native method or loaded library, and the linked native library contains public-IP or VPN/proxy indicators. Native control/data-flow is not proven, so this stays below strong Java-only detections."
+                        }
+                        hasJavaSuspiciousContext -> {
+                            "Java VPN/proxy context reaches a native method or loaded library, but native evidence is only a single unresolved indicator."
+                        }
+                        hasNativeActionableCompound -> {
+                            "A Java native bridge points to a library with public-IP or VPN-state indicators plus native proxy/bypass strings. Native control/data-flow is unresolved, so this remains a low-proof native-only suspicion."
+                        }
+                        else -> {
+                            "A Java native bridge points to native VPN/proxy-related strings, but they look like unresolved protocol/runtime support and Java-side detection intent is not proven."
+                        }
+                    }
+                    val key = "${candidate.className}#${candidate.methodName}:${library.libraryName}:$title"
+                    if (emitted.add(key)) {
+                        signals += signal(
+                            facts = (relatedJavaFacts + nativeFacts).distinct(),
+                            type = AppSemanticSignalType.COMBINATION,
+                            title = title,
+                            description = description,
+                            confidence = confidence,
+                            scope = AppSemanticRiskScope.CROSS_LAYER,
+                            source = AppSemanticEvidenceSource.NATIVE,
+                            proofConfidence = proofConfidence,
+                        )
+                    }
+                }
+            }
+
+        return signals
+            .sortedWith(
+                compareByDescending<AppSemanticSignal> { it.proofConfidence }
+                    .thenByDescending { it.confidence },
+            )
+            .take(MAX_NATIVE_BRIDGE_SIGNALS)
+    }
+
     private fun buildGroupSignals(
         facts: List<SemanticFact>,
         groupLabel: String,
         trustedVpnClient: Boolean,
         classLevel: Boolean,
+        allowLoosePackageApi: Boolean = true,
     ): List<AppSemanticSignal> {
         if (facts.isEmpty()) return emptyList()
         val scope = facts.first().scope
@@ -922,7 +1483,7 @@ class AppSemanticAnalyzer @Inject constructor() {
         val hasKnownVpnPackage = facts.has(SemanticFactKind.KNOWN_VPN_PACKAGE_REFERENCE) ||
             facts.has(SemanticFactKind.MANIFEST_KNOWN_VPN_PACKAGE_QUERY) ||
             facts.has(SemanticFactKind.KNOWN_VPN_PACKAGE_CHECK)
-        val hasVpnPackageScan = facts.hasVpnPackageScan()
+        val hasVpnPackageScan = facts.hasVpnPackageScan(allowLoosePackageApi = allowLoosePackageApi && !classLevel)
         val hasManifestOnlyVpnVisibility = scope == AppSemanticRiskScope.MANIFEST &&
             (
                 facts.has(SemanticFactKind.MANIFEST_VPN_SERVICE_QUERY) ||
@@ -943,25 +1504,60 @@ class AppSemanticAnalyzer @Inject constructor() {
             facts.has(SemanticFactKind.PUBLIC_IP_NETWORK_FLOW)
         val hasBypassBinding = facts.has(SemanticFactKind.NETWORK_BYPASS_BINDING)
         val hasUnderlyingEnum = facts.has(SemanticFactKind.UNDERLYING_NETWORK_ENUMERATION)
+        val hasVpnClientControl = facts.has(SemanticFactKind.VPN_CLIENT_CONTROL_CONTEXT)
+        val hasSplitTunnelContext = facts.has(SemanticFactKind.SPLIT_TUNNEL_APP_SELECTION)
+        val hasSelfProxyContext = facts.has(SemanticFactKind.LOCAL_PROXY_SELF_USE_CONTEXT)
+        val hasProxyScanContext = facts.has(SemanticFactKind.LOCAL_PROXY_SCAN_CONTEXT)
+        val hasSuspiciousProxyProbe = hasSocksProbe && (!hasSelfProxyContext || hasProxyScanContext)
+        val hasSystemProxyInspection = facts.has(SemanticFactKind.SYSTEM_PROXY_INSPECTION)
         val hasNetworkCapabilitiesVpn = facts.has(SemanticFactKind.NETWORK_CAPABILITIES_VPN_CHECK)
         val hasTunnelInterface = facts.has(SemanticFactKind.TUNNEL_INTERFACE_PROBE) ||
             facts.has(SemanticFactKind.TUNNEL_INTERFACE_API)
         val hasMtuProbe = facts.has(SemanticFactKind.MTU_PROBE)
         val hasProcSocketTable = facts.has(SemanticFactKind.PROC_SOCKET_TABLE)
+        val hasDnsInspection = facts.has(SemanticFactKind.DNS_SERVER_INSPECTION)
+        val hasRouteInspection = facts.has(SemanticFactKind.ROUTE_TABLE_INSPECTION)
         val hasDumpsys = facts.has(SemanticFactKind.ACTIVE_VPN_DUMPSYS)
+        val hasDeviceIdentifier = facts.has(SemanticFactKind.DEVICE_IDENTIFIER_COLLECTION)
+        val hasNetworkFingerprint = facts.has(SemanticFactKind.NETWORK_FINGERPRINT_COLLECTION) ||
+            facts.has(SemanticFactKind.USAGE_STATS_COLLECTION)
+        val hasDeviceOrNetworkFingerprint = hasDeviceIdentifier || hasNetworkFingerprint
         val hasVpnStateContext = hasNetworkCapabilitiesVpn ||
             hasTunnelInterface ||
             hasMtuProbe ||
             hasProcSocketTable ||
+            hasDnsInspection ||
+            hasRouteInspection ||
             hasDumpsys
         val hasStrongVpnIntentContext = hasPublicIp ||
             hasVpnPackageScan ||
             hasTelemetry ||
-            hasSocksProbe
+            hasSuspiciousProxyProbe
         val hasBranch = facts.has(SemanticFactKind.CONDITIONAL_BRANCH)
         val hasTrackerSdkContext = facts.hasTrackerSdkContext()
         val hasGenericNetworkStateSdkContext = scope == AppSemanticRiskScope.SDK_CODE &&
             facts.hasGenericNetworkStateSdkContext()
+        val hasLegitimateVpnManagementContext = (hasVpnClientControl || hasSplitTunnelContext) &&
+            !hasNetworkSink &&
+            !facts.has(SemanticFactKind.VPN_DATA_SERIALIZATION_FLOW) &&
+            !hasPublicIp &&
+            !hasProxyScanContext
+        val hasRiskyVpnPackageScan = hasVpnPackageScan && !hasLegitimateVpnManagementContext
+
+        if (
+            hasLegitimateVpnManagementContext &&
+            (hasVpnServiceQuery || hasBroadInventory || hasCollection)
+        ) {
+            result += signal(
+                facts = facts,
+                type = AppSemanticSignalType.CALL_GRAPH,
+                title = "VPN client or split-tunnel app selection context",
+                description = "Package visibility is connected to local VPN client management or split-tunnel app selection, without telemetry, public-IP probing, or proxy scanning in this graph.",
+                confidence = 6,
+                scope = scope,
+                source = source,
+            )
+        }
 
         if (hasManifestOnlyVpnVisibility && !trustedVpnClient) {
             result += signal(
@@ -983,9 +1579,17 @@ class AppSemanticAnalyzer @Inject constructor() {
             result += signal(
                 facts = facts,
                 type = AppSemanticSignalType.CALL_GRAPH,
-                title = "VpnService query without result use",
-                description = "Code queries PackageManager for android.net.VpnService, but this graph did not prove package/label collection.",
-                confidence = 10,
+                title = if (hasLegitimateVpnManagementContext) {
+                    "VpnService query in VPN client context"
+                } else {
+                    "VpnService query without result use"
+                },
+                description = if (hasLegitimateVpnManagementContext) {
+                    "Code queries VpnService while also managing a local VPN/split-tunnel flow; this is diagnostic unless the result reaches telemetry or probing."
+                } else {
+                    "Code queries PackageManager for android.net.VpnService, but this graph did not prove package/label collection."
+                },
+                confidence = if (hasLegitimateVpnManagementContext) 4 else 10,
                 scope = scope,
                 source = source,
             )
@@ -1042,6 +1646,42 @@ class AppSemanticAnalyzer @Inject constructor() {
             )
         }
 
+        if (hasSystemProxyInspection && !hasVpnPackageScan && !hasTelemetry) {
+            result += signal(
+                facts = facts.filter { it.kind == SemanticFactKind.SYSTEM_PROXY_INSPECTION },
+                type = AppSemanticSignalType.CALL_GRAPH,
+                title = "system proxy inspection",
+                description = "Code reads Android or JVM system proxy configuration. This is low alone and becomes stronger only when the proxy value reaches telemetry, public-IP comparison, or local proxy scanning.",
+                confidence = 8,
+                scope = scope,
+                source = source,
+            )
+        }
+
+        if (hasDnsInspection && !hasVpnPackageScan && !hasTelemetry) {
+            result += signal(
+                facts = facts.filter { it.kind == SemanticFactKind.DNS_SERVER_INSPECTION },
+                type = AppSemanticSignalType.CALL_GRAPH,
+                title = "DNS server inspection",
+                description = "Code reads LinkProperties DNS servers. This is low alone and becomes stronger with VPN transport, routing, or telemetry context.",
+                confidence = 8,
+                scope = scope,
+                source = source,
+            )
+        }
+
+        if (hasRouteInspection && !hasVpnPackageScan && !hasTelemetry) {
+            result += signal(
+                facts = facts.filter { it.kind == SemanticFactKind.ROUTE_TABLE_INSPECTION },
+                type = AppSemanticSignalType.CALL_GRAPH,
+                title = "route table inspection",
+                description = "Code reads Android route/link properties. This is low alone and becomes stronger with VPN state or bypass context.",
+                confidence = 8,
+                scope = scope,
+                source = source,
+            )
+        }
+
         if (hasDumpsys && !hasVpnPackageScan && !hasTelemetry) {
             result += signal(
                 facts = facts.filter { it.kind == SemanticFactKind.ACTIVE_VPN_DUMPSYS },
@@ -1058,13 +1698,21 @@ class AppSemanticAnalyzer @Inject constructor() {
             result += signal(
                 facts = facts,
                 type = AppSemanticSignalType.DFG,
-                title = "VPN app inventory collection",
-                description = "The graph shows VPN app discovery and extraction or collection of package/service metadata.",
-                confidence = 35,
+                title = if (hasLegitimateVpnManagementContext) {
+                    "VPN split-tunnel package inventory"
+                } else {
+                    "VPN app inventory collection"
+                },
+                description = if (hasLegitimateVpnManagementContext) {
+                    "VPN/package inventory is connected to local VPN client or split-tunnel app selection, without telemetry or probing in this graph."
+                } else {
+                    "The graph shows VPN app discovery and extraction or collection of package/service metadata."
+                },
+                confidence = if (hasLegitimateVpnManagementContext) 8 else 35,
                 scope = scope,
                 source = source,
             )
-        } else if (hasBroadInventory && hasKnownVpnPackage && !hasTelemetry && !trustedVpnClient) {
+        } else if (!classLevel && hasBroadInventory && hasKnownVpnPackage && !hasTelemetry && !trustedVpnClient && !hasLegitimateVpnManagementContext) {
             result += signal(
                 facts = facts,
                 type = AppSemanticSignalType.DFG,
@@ -1076,7 +1724,20 @@ class AppSemanticAnalyzer @Inject constructor() {
             )
         }
 
-        if (hasVpnPackageScan && hasTelemetry && hasBypassBinding) {
+        if (!classLevel && hasRiskyVpnPackageScan && hasCollection && hasDeviceOrNetworkFingerprint && !hasTelemetry) {
+            result += signal(
+                facts = facts,
+                type = AppSemanticSignalType.DFG,
+                title = "VPN app inventory with device/network fingerprint",
+                description = "VPN app/service inventory is collected in the same semantic graph as device, usage, Wi-Fi, operator, or network fingerprint fields. This is high-risk even when static analysis has not proven final transmission.",
+                confidence = 72,
+                scope = scope,
+                source = source,
+                proofConfidence = 88,
+            )
+        }
+
+        if (!classLevel && hasRiskyVpnPackageScan && hasTelemetry && hasBypassBinding) {
             result += signal(
                 facts = facts,
                 type = AppSemanticSignalType.COMBINATION,
@@ -1086,7 +1747,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                 scope = scope,
                 source = source,
             )
-        } else if (hasVpnPackageScan && hasTelemetry && hasSocksProbe && hasPublicIp) {
+        } else if (!classLevel && hasRiskyVpnPackageScan && hasTelemetry && hasSuspiciousProxyProbe && hasPublicIp) {
             result += signal(
                 facts = facts,
                 type = AppSemanticSignalType.COMBINATION,
@@ -1096,7 +1757,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                 scope = scope,
                 source = source,
             )
-        } else if (hasVpnPackageScan && hasTelemetry && hasSocksProbe) {
+        } else if (!classLevel && hasRiskyVpnPackageScan && hasTelemetry && hasSuspiciousProxyProbe) {
             result += signal(
                 facts = facts,
                 type = AppSemanticSignalType.COMBINATION,
@@ -1106,7 +1767,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                 scope = scope,
                 source = source,
             )
-        } else if (hasVpnPackageScan && hasTelemetry) {
+        } else if (!classLevel && hasRiskyVpnPackageScan && hasTelemetry) {
             result += signal(
                 facts = facts,
                 type = AppSemanticSignalType.COMBINATION,
@@ -1122,7 +1783,26 @@ class AppSemanticAnalyzer @Inject constructor() {
             )
         }
 
-        if (hasUnderlyingEnum && hasBypassBinding && hasNetworkCapabilitiesVpn && hasStrongVpnIntentContext) {
+        if (!classLevel && hasVpnStateContext && hasTelemetry && hasDeviceOrNetworkFingerprint && !hasLegitimateVpnManagementContext) {
+            result += signal(
+                facts = facts,
+                type = AppSemanticSignalType.COMBINATION,
+                title = "VPN state embedded in device/network fingerprint",
+                description = "VPN/proxy state is written into a telemetry-style payload together with device, usage, Wi-Fi, operator, or network fingerprint fields.",
+                confidence = when {
+                    hasNetworkSink -> 84
+                    facts.has(SemanticFactKind.VPN_DATA_SERIALIZATION_FLOW) -> 75
+                    hasTrackerSdkContext -> 72
+                    hasGenericNetworkStateSdkContext -> 18
+                    else -> 70
+                },
+                scope = scope,
+                source = source,
+                proofConfidence = if (hasGenericNetworkStateSdkContext) 38 else 88,
+            )
+        }
+
+        if (!classLevel && hasUnderlyingEnum && hasBypassBinding && hasNetworkCapabilitiesVpn && hasStrongVpnIntentContext && !hasLegitimateVpnManagementContext) {
             result += signal(
                 facts = facts,
                 type = AppSemanticSignalType.COMBINATION,
@@ -1146,7 +1826,19 @@ class AppSemanticAnalyzer @Inject constructor() {
             )
         }
 
-        if (hasSocksProbe && hasPublicIp && !hasVpnPackageScan) {
+        if (!classLevel && hasPublicIp && hasNetworkCapabilitiesVpn && hasNetworkSink) {
+            result += signal(
+                facts = facts,
+                type = AppSemanticSignalType.COMBINATION,
+                title = "public-IP and VPN-state analytics telemetry path",
+                description = "The graph combines public-IP lookup, Android VPN transport state, and an analytics or telemetry sink.",
+                confidence = 88,
+                scope = scope,
+                source = source,
+            )
+        }
+
+        if (!classLevel && hasSuspiciousProxyProbe && hasPublicIp && !hasVpnPackageScan) {
             result += signal(
                 facts = facts,
                 type = AppSemanticSignalType.COMBINATION,
@@ -1158,8 +1850,43 @@ class AppSemanticAnalyzer @Inject constructor() {
             )
         }
 
-        if (hasBranch && (hasVpnPackageScan || hasVpnStateContext) && hasTelemetry) {
+        if (!classLevel && hasProxyScanContext && hasPublicIp && !hasVpnPackageScan) {
+            result += signal(
+                facts = facts,
+                type = AppSemanticSignalType.COMBINATION,
+                title = "local proxy/control API probing with exit-IP context",
+                description = "Proxy scanner/control-API terms are connected to public-IP lookup, which can expose local proxy or VPN exit behavior.",
+                confidence = 70,
+                scope = scope,
+                source = source,
+            )
+        } else if (!classLevel && hasProxyScanContext && !hasSelfProxyContext) {
+            result += signal(
+                facts = facts,
+                type = AppSemanticSignalType.STRING_FLOW,
+                title = "local proxy/control API scanner context",
+                description = "The graph contains local proxy scanner, Xray/Clash control API, or SOCKS probing context. This is diagnostic until exit-IP, socket, or telemetry flow is confirmed.",
+                confidence = 30,
+                scope = scope,
+                source = source,
+            )
+        }
+
+        if (!classLevel && hasSystemProxyInspection && hasTelemetry && !hasSelfProxyContext) {
+            result += signal(
+                facts = facts,
+                type = AppSemanticSignalType.DFG,
+                title = "system proxy telemetry path",
+                description = "System proxy state is connected to telemetry or serialization in the same semantic graph. This is suspicious, but lower confidence than active localhost proxy probing.",
+                confidence = if (hasNetworkSink || facts.has(SemanticFactKind.VPN_DATA_SERIALIZATION_FLOW)) 45 else 25,
+                scope = scope,
+                source = source,
+            )
+        }
+
+        if (!classLevel && hasBranch && (hasRiskyVpnPackageScan || hasVpnStateContext) && hasTelemetry) {
             val confidence = when {
+                hasLegitimateVpnManagementContext -> 12
                 hasNetworkSink || facts.has(SemanticFactKind.VPN_DATA_SERIALIZATION_FLOW) -> 70
                 hasTrackerSdkContext -> 57
                 scope == AppSemanticRiskScope.APP_CODE -> 50
@@ -1220,22 +1947,153 @@ class AppSemanticAnalyzer @Inject constructor() {
         confidence: Int,
         scope: AppSemanticRiskScope,
         source: AppSemanticEvidenceSource,
+        proofConfidence: Int? = null,
     ): AppSemanticSignal {
         val chain = facts
             .sortedBy { it.kind.ordinal }
             .map { it.evidenceLine() }
             .distinct()
             .take(MAX_EVIDENCE_CHAIN)
+        val riskConfidence = confidence.coerceIn(0, 100)
+        val semanticProofConfidence = (
+            proofConfidence ?: inferProofConfidence(
+                facts = facts,
+                type = type,
+                riskConfidence = riskConfidence,
+                scope = scope,
+                source = source,
+            )
+            ).coerceIn(0, 100)
         return AppSemanticSignal(
             type = type,
             title = title,
             description = description,
             evidence = chain.firstOrNull().orEmpty(),
-            confidence = confidence.coerceIn(0, 100),
+            confidence = riskConfidence,
             scope = scope,
             source = source,
             evidenceChain = chain,
+            proofConfidence = semanticProofConfidence,
+            proofLevel = AppSemanticProofLevel.from(semanticProofConfidence),
+            proofReason = proofReasonForSignal(
+                facts = facts,
+                type = type,
+                riskConfidence = riskConfidence,
+                proofConfidence = semanticProofConfidence,
+                scope = scope,
+                source = source,
+            ),
         )
+    }
+
+    private fun proofReasonForSignal(
+        facts: List<SemanticFact>,
+        type: AppSemanticSignalType,
+        riskConfidence: Int,
+        proofConfidence: Int,
+        scope: AppSemanticRiskScope,
+        source: AppSemanticEvidenceSource,
+    ): String {
+        if (riskConfidence <= 0 || proofConfidence <= 0) {
+            return "Neutral context marker; it explains why related low-level checks were not treated as a proven threat."
+        }
+
+        val hasOnlyManifestFacts = facts.isNotEmpty() && facts.all { it.scope == AppSemanticRiskScope.MANIFEST }
+        val hasOnlyNativeFacts = facts.isNotEmpty() && facts.all { it.scope == AppSemanticRiskScope.NATIVE_CODE }
+        val touchesNative = scope == AppSemanticRiskScope.NATIVE_CODE ||
+            source == AppSemanticEvidenceSource.NATIVE ||
+            facts.any { it.scope == AppSemanticRiskScope.NATIVE_CODE }
+        val semanticType = type == AppSemanticSignalType.COMBINATION ||
+            type == AppSemanticSignalType.CFG ||
+            type == AppSemanticSignalType.DFG
+        val packageApiOnly = facts.has(SemanticFactKind.PACKAGE_QUERY_API) &&
+            !facts.has(SemanticFactKind.PACKAGE_QUERY_VPN_SERVICE) &&
+            !facts.has(SemanticFactKind.KNOWN_VPN_PACKAGE_REFERENCE) &&
+            !facts.has(SemanticFactKind.KNOWN_VPN_PACKAGE_CHECK) &&
+            !facts.has(SemanticFactKind.MANIFEST_KNOWN_VPN_PACKAGE_QUERY)
+
+        return when {
+            hasOnlyManifestFacts || scope == AppSemanticRiskScope.MANIFEST -> {
+                "Low proof: only manifest/package-visibility evidence was found; code usage was not confirmed."
+            }
+            hasOnlyNativeFacts || scope == AppSemanticRiskScope.NATIVE_CODE -> {
+                "Low proof: native strings or symbols were found, but Java/JNI data-flow or control-flow did not prove how they are used."
+            }
+            touchesNative -> {
+                "Medium proof: Java reaches native evidence, but native internal data-flow is unresolved, so this stays below fully proven Java chains."
+            }
+            packageApiOnly -> {
+                "Medium proof: a generic PackageManager API appears in the graph, but it is not tightly bound to a VPN service/package match."
+            }
+            source == AppSemanticEvidenceSource.APP_TO_SDK -> {
+                "Medium/high proof: app data crosses an SDK boundary; confidence depends on whether telemetry/proxy/public-IP evidence is also in the same graph."
+            }
+            semanticType && proofConfidence >= 80 -> {
+                "High proof: tracked VPN/proxy facts are connected by semantic data-flow, control-flow, or one bounded call chain."
+            }
+            semanticType && proofConfidence >= 50 -> {
+                "Medium proof: several relevant checks are in the same semantic graph, but the final harmful use is not fully proven."
+            }
+            else -> {
+                "Low proof: standalone diagnostic signal without a proven telemetry, bypass, blocking, or exit-IP chain."
+            }
+        }
+    }
+
+    private fun inferProofConfidence(
+        facts: List<SemanticFact>,
+        type: AppSemanticSignalType,
+        riskConfidence: Int,
+        scope: AppSemanticRiskScope,
+        source: AppSemanticEvidenceSource,
+    ): Int {
+        if (riskConfidence <= 0) return 0
+
+        val hasOnlyManifestFacts = facts.isNotEmpty() && facts.all { it.scope == AppSemanticRiskScope.MANIFEST }
+        val hasOnlyNativeFacts = facts.isNotEmpty() && facts.all { it.scope == AppSemanticRiskScope.NATIVE_CODE }
+        val touchesNative = scope == AppSemanticRiskScope.NATIVE_CODE ||
+            source == AppSemanticEvidenceSource.NATIVE ||
+            facts.any { it.scope == AppSemanticRiskScope.NATIVE_CODE }
+        val semanticType = type == AppSemanticSignalType.COMBINATION ||
+            type == AppSemanticSignalType.CFG ||
+            type == AppSemanticSignalType.DFG
+
+        val inferred = when {
+            scope == AppSemanticRiskScope.MANIFEST || hasOnlyManifestFacts -> riskConfidence.coerceAtMost(25)
+            scope == AppSemanticRiskScope.NATIVE_CODE || hasOnlyNativeFacts -> when {
+                riskConfidence >= 35 -> 30
+                riskConfidence >= 20 -> 25
+                else -> 18
+            }
+            touchesNative -> when {
+                semanticType && riskConfidence >= 50 -> 62
+                semanticType && riskConfidence >= 40 -> 50
+                else -> 35
+            }
+            source == AppSemanticEvidenceSource.APP_TO_SDK -> when {
+                riskConfidence >= 90 -> 94
+                riskConfidence >= 70 -> 86
+                riskConfidence >= 45 -> 65
+                else -> 50
+            }
+            semanticType && riskConfidence >= 90 -> 98
+            semanticType && riskConfidence >= 70 -> 92
+            type == AppSemanticSignalType.CFG && riskConfidence >= 50 -> 88
+            type == AppSemanticSignalType.DFG && riskConfidence >= 35 -> 70
+            type == AppSemanticSignalType.COMBINATION && riskConfidence >= 50 -> 82
+            riskConfidence >= 30 -> 55
+            else -> (riskConfidence + 20).coerceAtMost(45)
+        }
+        val packageApiOnly = facts.has(SemanticFactKind.PACKAGE_QUERY_API) &&
+            !facts.has(SemanticFactKind.PACKAGE_QUERY_VPN_SERVICE) &&
+            !facts.has(SemanticFactKind.KNOWN_VPN_PACKAGE_REFERENCE) &&
+            !facts.has(SemanticFactKind.KNOWN_VPN_PACKAGE_CHECK) &&
+            !facts.has(SemanticFactKind.MANIFEST_KNOWN_VPN_PACKAGE_QUERY)
+        return if (packageApiOnly && inferred >= 80) {
+            65
+        } else {
+            inferred
+        }
     }
 
     private fun bucketFor(
@@ -1255,16 +2113,70 @@ class AppSemanticAnalyzer @Inject constructor() {
                     signal.type != AppSemanticSignalType.COMBINATION &&
                     signal.type != AppSemanticSignalType.DFG
             }
+        val strongTitles = scopedSignals
+            .filter { signal ->
+                signal.confidence >= 50 &&
+                    (
+                        signal.type == AppSemanticSignalType.COMBINATION ||
+                            signal.type == AppSemanticSignalType.CFG ||
+                            signal.type == AppSemanticSignalType.DFG
+                        )
+            }
+            .map(AppSemanticSignal::title)
+            .toSet()
+        val hasCompoundCritical = scope == AppSemanticRiskScope.APP_CODE &&
+            (
+                (
+                    "VPN app inventory telemetry path" in strongTitles &&
+                        "localhost proxy probe with exit-IP comparison" in strongTitles
+                    ) ||
+                    (
+                        "localhost proxy probe with exit-IP comparison" in strongTitles &&
+                            "branching VPN-state telemetry decision" in strongTitles
+                        )
+                )
         val score = when {
-            hasExplicitCritical -> rawScore
-            hasOnlyWeakDiagnostics -> rawScore.coerceAtMost(42)
+            hasExplicitCritical || hasCompoundCritical -> rawScore
+            hasOnlyWeakDiagnostics -> rawScore.coerceAtMost(19)
             else -> rawScore.coerceAtMost(89)
         }
+        val proofConfidence = proofConfidenceFor(scopedSignals)
         return AppSemanticRiskBucket(
             score = score,
             riskLevel = riskLevelFor(score, scopedSignals),
             signals = scopedSignals,
+            proofConfidence = proofConfidence,
+            proofLevel = AppSemanticProofLevel.from(proofConfidence),
         )
+    }
+
+    private fun proofConfidenceFor(signals: List<AppSemanticSignal>): Int {
+        if (signals.isEmpty()) return 0
+
+        val maxProof = signals.maxOf(AppSemanticSignal::proofConfidence)
+        val distinctPartialSemanticTitles = signals
+            .filter { signal ->
+                signal.scope != AppSemanticRiskScope.NATIVE_CODE &&
+                    signal.scope != AppSemanticRiskScope.MANIFEST &&
+                    signal.proofConfidence in 35 until 80 &&
+                    signal.confidence >= 25
+            }
+            .map { signal -> "${signal.scope}:${signal.title}" }
+            .distinct()
+            .size
+        val independentPartialProof = if (distinctPartialSemanticTitles >= 2) 55 else 0
+        val unresolvedNativeCap = if (
+            signals.all { signal ->
+                signal.scope == AppSemanticRiskScope.NATIVE_CODE ||
+                    signal.source == AppSemanticEvidenceSource.NATIVE
+            }
+        ) {
+            45
+        } else {
+            100
+        }
+
+        return maxOf(maxProof, independentPartialProof).coerceAtMost(unresolvedNativeCap)
     }
 
     private fun buildCfg(instructions: List<Instruction>): CfgStats {
@@ -1395,6 +2307,10 @@ class AppSemanticAnalyzer @Inject constructor() {
         }
     }
 
+    private fun org.jf.dexlib2.iface.Method.isNativeDeclaration(): Boolean {
+        return accessFlags and NATIVE_METHOD_ACCESS_FLAG != 0
+    }
+
     private fun MethodReference.isNetworkTransportCall(): Boolean {
         val className = dexTypeName(definingClass)
         return className.startsWith("java.net.") ||
@@ -1436,8 +2352,11 @@ class AppSemanticAnalyzer @Inject constructor() {
             -> true
             DataTag.VPN_SERVICE_ACTION,
             DataTag.VPN_INTENT,
+            DataTag.SELF_PACKAGE_NAME,
+            DataTag.SELF_SCOPED_VPN_INTENT,
             DataTag.BROAD_PACKAGE_RESULT,
             DataTag.VPN_TELEMETRY_VALUE,
+            DataTag.DEVICE_FINGERPRINT_VALUE,
             -> false
         }
     }
@@ -1456,15 +2375,239 @@ class AppSemanticAnalyzer @Inject constructor() {
         return VPN_TELEMETRY_TERMS.any { term -> value.contains(term, ignoreCase = true) }
     }
 
+    private fun isTelemetrySinkCall(
+        className: String,
+        methodName: String,
+    ): Boolean {
+        return isTelemetrySinkCall(
+            className = className,
+            methodName = methodName,
+            hasTrackedPayload = false,
+        )
+    }
+
+    private fun isTelemetrySinkCall(
+        className: String,
+        methodName: String,
+        hasTrackedPayload: Boolean,
+    ): Boolean {
+        val telemetryClass = className in TELEMETRY_CLASS_NAMES ||
+            TELEMETRY_CLASS_TERMS.any { term -> className.contains(term, ignoreCase = true) }
+        return when {
+            telemetryClass -> !isTelemetryAccessorMethod(methodName)
+            hasTrackedPayload && methodName in TELEMETRY_METHOD_NAMES -> true
+            else -> false
+        }
+    }
+
+    private fun isTelemetryAccessorMethod(methodName: String): Boolean {
+        return methodName == "<init>" ||
+            methodName.startsWith("get") ||
+            methodName.startsWith("set") ||
+            methodName.startsWith("component") ||
+            methodName in TELEMETRY_ACCESSOR_METHOD_NAMES
+    }
+
     private fun isSocksOrLocalProxyText(value: String): Boolean {
         return value == "127.0.0.1" ||
             value == "::1" ||
             value.equals("localhost", ignoreCase = true) ||
-            value.contains("SOCKS5", ignoreCase = true) ||
-            value.contains("socksProxyHost", ignoreCase = true) ||
-            value.contains("socksProxyPort", ignoreCase = true) ||
-            value.contains("http.proxyHost", ignoreCase = true) ||
-            value.contains("http.proxyPort", ignoreCase = true)
+            value.contains("SOCKS5", ignoreCase = true)
+    }
+
+    private fun isSystemProxyPropertyText(value: String): Boolean {
+        return SYSTEM_PROXY_PROPERTY_TERMS.any { term -> value.contains(term, ignoreCase = true) }
+    }
+
+    private fun isDeviceIdentifierText(value: String): Boolean {
+        val normalized = value.trim()
+        return normalized in DEVICE_IDENTIFIER_TEXT_TERMS ||
+            DEVICE_IDENTIFIER_TEXT_TERMS.any { term ->
+                normalized.contains(term, ignoreCase = true) && term.length >= 6
+            }
+    }
+
+    private fun isNetworkFingerprintText(value: String): Boolean {
+        val normalized = value.trim()
+        return normalized in NETWORK_FINGERPRINT_TEXT_TERMS
+    }
+
+    private fun isProcRouteText(value: String): Boolean {
+        return value == "/proc/net/route" ||
+            value == "/proc/self/net/route" ||
+            value.endsWith("/proc/net/route") ||
+            value.endsWith("/proc/self/net/route")
+    }
+
+    private fun isSplitTunnelText(value: String): Boolean {
+        return SPLIT_TUNNEL_TERMS.any { term -> value.contains(term, ignoreCase = true) }
+    }
+
+    private fun isLocalProxyScanText(value: String): Boolean {
+        val trimmed = value.trim()
+        return trimmed in LOCAL_PROXY_SCAN_EXACT_TERMS ||
+            LOCAL_PROXY_SCAN_TERMS.any { term -> containsLocalProxyScanTerm(value, term) }
+    }
+
+    private fun containsLocalProxyScanTerm(
+        value: String,
+        term: String,
+    ): Boolean {
+        if (term.any { !it.isLetterOrDigit() }) {
+            return value.contains(term, ignoreCase = true)
+        }
+
+        var startIndex = value.indexOf(term, ignoreCase = true)
+        while (startIndex >= 0) {
+            val endIndex = startIndex + term.length
+            val beforeOk = startIndex == 0 || !value[startIndex - 1].isLetterOrDigit()
+            val afterOk = endIndex == value.length ||
+                !value[endIndex].isLetterOrDigit() ||
+                value[endIndex].isUpperCase()
+            if (beforeOk && afterOk) return true
+            startIndex = value.indexOf(term, startIndex + 1, ignoreCase = true)
+        }
+        return false
+    }
+
+    private fun isSelfProxyText(value: String): Boolean {
+        return SELF_PROXY_TERMS.any { term -> value.contains(term, ignoreCase = true) }
+    }
+
+    private fun isVpnClientControlCall(
+        className: String,
+        methodName: String,
+    ): Boolean {
+        return (className == "android.net.VpnService" && methodName == "prepare") ||
+            className == "android.net.VpnService.Builder"
+    }
+
+    private fun isVpnLaunchCall(
+        className: String,
+        methodName: String,
+    ): Boolean {
+        return (className == "android.content.Context" && methodName in VPN_LAUNCH_METHODS) ||
+            (className == "android.app.Activity" && methodName in VPN_LAUNCH_METHODS)
+    }
+
+    private fun isSplitTunnelVpnBuilderCall(
+        className: String,
+        methodName: String,
+    ): Boolean {
+        return className == "android.net.VpnService.Builder" &&
+            methodName in SPLIT_TUNNEL_BUILDER_METHODS
+    }
+
+    private fun isSelfProxyUseCall(
+        className: String,
+        methodName: String,
+    ): Boolean {
+        return className == "java.net.Proxy" ||
+            className == "java.net.ProxySelector" ||
+            (className == "okhttp3.OkHttpClient.Builder" && methodName in SELF_PROXY_BUILDER_METHODS) ||
+            (className == "java.lang.System" && methodName == "setProperty")
+    }
+
+    private fun isSystemProxyInspectionCall(
+        className: String,
+        methodName: String,
+    ): Boolean {
+        return (className == "android.net.ConnectivityManager" && methodName == "getDefaultProxy") ||
+            (className == "android.net.LinkProperties" && methodName == "getHttpProxy") ||
+            (className == "android.net.ProxyInfo" && methodName in PROXY_INFO_INSPECTION_METHODS) ||
+            (className == "android.net.Proxy" && methodName in ANDROID_PROXY_INSPECTION_METHODS)
+    }
+
+    private fun isSystemProxyValueCall(
+        className: String,
+        methodName: String,
+    ): Boolean {
+        return (className == "android.net.ConnectivityManager" && methodName == "getDefaultProxy") ||
+            (className == "android.net.LinkProperties" && methodName == "getHttpProxy") ||
+            (className == "android.net.ProxyInfo" && methodName in PROXY_INFO_VALUE_METHODS) ||
+            (className == "android.net.Proxy" && methodName in ANDROID_PROXY_VALUE_METHODS)
+    }
+
+    private fun isDeviceIdentifierCollectionCall(
+        className: String,
+        methodName: String,
+    ): Boolean {
+        return (className == "android.provider.Settings.Secure" && methodName == "getString") ||
+            (className == "android.telephony.TelephonyManager" && methodName in TELEPHONY_IDENTIFIER_METHODS) ||
+            (className == "com.google.android.gms.ads.identifier.AdvertisingIdClient" && methodName == "getAdvertisingIdInfo") ||
+            className.startsWith("com.google.firebase.installations.") ||
+            className.contains("AppSetId", ignoreCase = true)
+    }
+
+    private fun isNetworkFingerprintCollectionCall(
+        className: String,
+        methodName: String,
+    ): Boolean {
+        return (className == "android.net.wifi.WifiManager" && methodName in WIFI_FINGERPRINT_METHODS) ||
+            (className == "android.net.wifi.WifiInfo" && methodName in WIFI_FINGERPRINT_METHODS) ||
+            (className == "android.telephony.TelephonyManager" && methodName in TELEPHONY_NETWORK_FINGERPRINT_METHODS) ||
+            (className == "android.net.NetworkInfo" && methodName in NETWORK_INFO_FINGERPRINT_METHODS)
+    }
+
+    private fun isUsageStatsCollectionCall(
+        className: String,
+        methodName: String,
+    ): Boolean {
+        return className == "android.app.usage.UsageStatsManager" &&
+            methodName in setOf("queryUsageStats", "queryEvents", "queryAndAggregateUsageStats")
+    }
+
+    private fun isDeviceIdentifierField(
+        definingClass: String,
+        fieldName: String,
+    ): Boolean {
+        return definingClass == "Landroid/os/Build;" && fieldName in BUILD_IDENTIFIER_FIELDS
+    }
+
+    private fun nativeLoadLibraryName(
+        methodName: String,
+        value: String,
+    ): String? {
+        return when (methodName) {
+            "loadLibrary" -> value.trim().takeIf(String::isNotBlank)?.removePrefix("lib")?.removeSuffix(".so")
+            "load" -> nativeLibraryName(value).takeIf(String::isNotBlank)
+            else -> null
+        }
+    }
+
+    private fun nativeLibraryName(value: String): String {
+        val fileName = value
+            .substringBefore(" -> ")
+            .substringAfterLast("!/")
+            .substringAfterLast('/')
+            .substringAfterLast('\\')
+        return fileName
+            .removePrefix("lib")
+            .removeSuffix(".so")
+            .trim()
+    }
+
+    private fun jniSymbolPrefix(
+        className: String,
+        methodName: String,
+    ): String {
+        val encodedClass = className
+            .split('.')
+            .joinToString("_") { part -> jniEncodeIdentifier(part) }
+        return "Java_${encodedClass}_${jniEncodeIdentifier(methodName)}"
+    }
+
+    private fun jniEncodeIdentifier(value: String): String {
+        return buildString {
+            value.forEach { char ->
+                when (char) {
+                    '_' -> append("_1")
+                    ';' -> append("_2")
+                    '[' -> append("_3")
+                    else -> append(char)
+                }
+            }
+        }
     }
 
     private fun isTunnelInterfaceText(value: String): Boolean {
@@ -1477,6 +2620,13 @@ class AppSemanticAnalyzer @Inject constructor() {
 
     private fun methodSignature(reference: MethodReference): String {
         return "${dexTypeName(reference.definingClass)}#${reference.name}"
+    }
+
+    private fun methodNameWithParameters(
+        name: String,
+        parameterTypes: Iterable<CharSequence>,
+    ): String {
+        return "$name${parameterTypes.joinToString(prefix = "(", postfix = ")")}"
     }
 
     private fun dexTypeName(value: String?): String {
@@ -1526,7 +2676,9 @@ class AppSemanticAnalyzer @Inject constructor() {
         return any { it.kind == kind }
     }
 
-    private fun List<SemanticFact>.hasVpnPackageScan(): Boolean {
+    private fun List<SemanticFact>.hasVpnPackageScan(
+        allowLoosePackageApi: Boolean = true,
+    ): Boolean {
         val hasVpnServiceQuery = has(SemanticFactKind.PACKAGE_QUERY_VPN_SERVICE)
         val hasPackageQueryApi = has(SemanticFactKind.PACKAGE_QUERY_API)
         val hasBroadInventory = has(SemanticFactKind.BROAD_PACKAGE_INVENTORY)
@@ -1535,8 +2687,8 @@ class AppSemanticAnalyzer @Inject constructor() {
             has(SemanticFactKind.KNOWN_VPN_PACKAGE_CHECK)
         return hasVpnServiceQuery ||
             has(SemanticFactKind.KNOWN_VPN_PACKAGE_CHECK) ||
-            (hasPackageQueryApi && hasKnownVpnPackage) ||
-            (hasBroadInventory && hasKnownVpnPackage)
+            (allowLoosePackageApi && hasPackageQueryApi && hasKnownVpnPackage) ||
+            (allowLoosePackageApi && hasBroadInventory && hasKnownVpnPackage)
     }
 
     private fun List<SemanticFact>.hasTrackerSdkContext(): Boolean {
@@ -1570,6 +2722,9 @@ class AppSemanticAnalyzer @Inject constructor() {
             SemanticFactKind.MANIFEST_KNOWN_VPN_PACKAGE_QUERY -> "manifest known VPN package visibility"
             SemanticFactKind.VPN_SERVICE_ACTION -> "android.net.VpnService action"
             SemanticFactKind.VPN_SERVICE_INTENT -> "Intent for android.net.VpnService"
+            SemanticFactKind.SELF_PACKAGE_SCOPED_VPN_QUERY -> "self-package scoped VpnService query"
+            SemanticFactKind.VPN_CLIENT_CONTROL_CONTEXT -> "local VPN client control context"
+            SemanticFactKind.SPLIT_TUNNEL_APP_SELECTION -> "split-tunnel app selection context"
             SemanticFactKind.PACKAGE_QUERY_API -> "PackageManager query API"
             SemanticFactKind.PACKAGE_QUERY_VPN_SERVICE -> "queryIntentServices(android.net.VpnService)"
             SemanticFactKind.BROAD_PACKAGE_INVENTORY -> "broad installed package inventory"
@@ -1583,7 +2738,12 @@ class AppSemanticAnalyzer @Inject constructor() {
             SemanticFactKind.VPN_DATA_NETWORK_FLOW -> "VPN/proxy data flows into network call"
             SemanticFactKind.VPN_DATA_SDK_HANDOFF -> "VPN/proxy data handed from app code to SDK boundary"
             SemanticFactKind.NETWORK_LIBRARY_CALL -> "network library/API call"
+            SemanticFactKind.NATIVE_METHOD_DECLARATION -> "Java/Kotlin native method declaration"
+            SemanticFactKind.NATIVE_LIBRARY_LOAD -> "native library load"
+            SemanticFactKind.SYSTEM_PROXY_INSPECTION -> "system proxy inspection"
             SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE -> "SOCKS or localhost proxy probe"
+            SemanticFactKind.LOCAL_PROXY_SELF_USE_CONTEXT -> "local proxy self-use context"
+            SemanticFactKind.LOCAL_PROXY_SCAN_CONTEXT -> "local proxy scanner/prober context"
             SemanticFactKind.PUBLIC_IP_PROBE -> "public-IP endpoint reference"
             SemanticFactKind.PUBLIC_IP_NETWORK_FLOW -> "public-IP endpoint flows into network call"
             SemanticFactKind.NETWORK_BYPASS_BINDING -> "underlying network/socket binding API"
@@ -1593,7 +2753,12 @@ class AppSemanticAnalyzer @Inject constructor() {
             SemanticFactKind.TUNNEL_INTERFACE_PROBE -> "tunnel interface name probe"
             SemanticFactKind.MTU_PROBE -> "MTU heuristic probe"
             SemanticFactKind.PROC_SOCKET_TABLE -> "proc socket table inspection"
+            SemanticFactKind.DNS_SERVER_INSPECTION -> "DNS server inspection"
+            SemanticFactKind.ROUTE_TABLE_INSPECTION -> "route table inspection"
             SemanticFactKind.ACTIVE_VPN_DUMPSYS -> "active dumpsys VPN probe"
+            SemanticFactKind.DEVICE_IDENTIFIER_COLLECTION -> "device identifier collection"
+            SemanticFactKind.NETWORK_FINGERPRINT_COLLECTION -> "network or Wi-Fi fingerprint collection"
+            SemanticFactKind.USAGE_STATS_COLLECTION -> "usage statistics collection"
             SemanticFactKind.CONDITIONAL_BRANCH -> "conditional control-flow branch"
         }
     }
@@ -1623,6 +2788,7 @@ class AppSemanticAnalyzer @Inject constructor() {
         val cfgEdges: Int,
         val dfgEdges: Int,
         val facts: List<SemanticFact>,
+        val calls: List<MethodCall>,
     )
 
     private data class CfgStats(
@@ -1644,9 +2810,39 @@ class AppSemanticAnalyzer @Inject constructor() {
         var cfgEdgeCount: Int = 0
         var dfgEdgeCount: Int = 0
         val facts = mutableListOf<SemanticFact>()
+        val methodCalls = mutableListOf<MethodCall>()
+        val nativeBridgeCandidates = mutableListOf<NativeBridgeCandidate>()
+        val nativeLibraries = linkedMapOf<String, NativeLibrarySummary>()
 
         fun addFact(fact: SemanticFact) {
             facts += fact
+        }
+
+        fun addMethodCall(call: MethodCall) {
+            methodCalls += call
+        }
+
+        fun addNativeBridgeCandidate(candidate: NativeBridgeCandidate) {
+            nativeBridgeCandidates += candidate
+        }
+
+        fun addNativeLibraryText(
+            libraryName: String,
+            evidence: String,
+            value: String,
+        ) {
+            nativeLibraries
+                .getOrPut(libraryName) { NativeLibrarySummary(libraryName = libraryName, evidence = evidence) }
+                .addText(value)
+        }
+
+        fun addNativeLibraryFact(
+            libraryName: String,
+            fact: SemanticFact,
+        ) {
+            nativeLibraries
+                .getOrPut(libraryName) { NativeLibrarySummary(libraryName = libraryName, evidence = fact.evidence) }
+                .facts += fact
         }
     }
 
@@ -1667,6 +2863,63 @@ class AppSemanticAnalyzer @Inject constructor() {
         val methodName: String,
     )
 
+    private data class MethodCall(
+        val callerScope: AppSemanticRiskScope,
+        val source: AppSemanticEvidenceSource,
+        val callerClass: String,
+        val callerMethod: String,
+        val targetClass: String,
+        val targetMethod: String,
+    )
+
+    private data class NativeBridgeCandidate(
+        val scope: AppSemanticRiskScope,
+        val source: AppSemanticEvidenceSource,
+        val className: String,
+        val methodName: String,
+        val simpleMethodName: String,
+        val evidence: String,
+    )
+
+    private data class NativeLibrarySummary(
+        val libraryName: String,
+        val evidence: String,
+        val facts: MutableList<SemanticFact> = mutableListOf(),
+        val symbolTexts: MutableSet<String> = linkedSetOf(),
+        val jniSymbolTexts: MutableSet<String> = linkedSetOf(),
+        var hasJniOnLoad: Boolean = false,
+        var hasRegisterNatives: Boolean = false,
+    ) {
+        fun addText(value: String) {
+            if (value.contains("JNI_OnLoad")) hasJniOnLoad = true
+            if (value.contains("RegisterNatives")) hasRegisterNatives = true
+            if (value.contains("Java_")) {
+                jniSymbolTexts += value
+            }
+            if (
+                symbolTexts.size < MAX_NATIVE_LIBRARY_SYMBOL_TEXTS &&
+                value.length in 2..128 &&
+                value.all { char -> char.isLetterOrDigit() || char == '_' || char == '$' }
+            ) {
+                symbolTexts += value
+            }
+        }
+
+        fun matchesLoadName(value: String): Boolean {
+            val normalized = value
+                .substringBefore(" -> ")
+                .substringAfterLast("!/")
+                .substringAfterLast('/')
+                .substringAfterLast('\\')
+                .removePrefix("lib")
+                .removeSuffix(".so")
+                .trim()
+            return value == libraryName ||
+                value == "lib$libraryName.so" ||
+                normalized == libraryName
+        }
+    }
+
     private data class ClassGroup(
         val scope: AppSemanticRiskScope,
         val source: AppSemanticEvidenceSource,
@@ -1684,6 +2937,9 @@ class AppSemanticAnalyzer @Inject constructor() {
         MANIFEST_KNOWN_VPN_PACKAGE_QUERY,
         VPN_SERVICE_ACTION,
         VPN_SERVICE_INTENT,
+        SELF_PACKAGE_SCOPED_VPN_QUERY,
+        VPN_CLIENT_CONTROL_CONTEXT,
+        SPLIT_TUNNEL_APP_SELECTION,
         PACKAGE_QUERY_API,
         PACKAGE_QUERY_VPN_SERVICE,
         BROAD_PACKAGE_INVENTORY,
@@ -1697,7 +2953,12 @@ class AppSemanticAnalyzer @Inject constructor() {
         VPN_DATA_NETWORK_FLOW,
         VPN_DATA_SDK_HANDOFF,
         NETWORK_LIBRARY_CALL,
+        NATIVE_METHOD_DECLARATION,
+        NATIVE_LIBRARY_LOAD,
+        SYSTEM_PROXY_INSPECTION,
         SOCKS_OR_LOCAL_PROXY_PROBE,
+        LOCAL_PROXY_SELF_USE_CONTEXT,
+        LOCAL_PROXY_SCAN_CONTEXT,
         PUBLIC_IP_PROBE,
         PUBLIC_IP_NETWORK_FLOW,
         NETWORK_BYPASS_BINDING,
@@ -1707,13 +2968,20 @@ class AppSemanticAnalyzer @Inject constructor() {
         TUNNEL_INTERFACE_PROBE,
         MTU_PROBE,
         PROC_SOCKET_TABLE,
+        DNS_SERVER_INSPECTION,
+        ROUTE_TABLE_INSPECTION,
         ACTIVE_VPN_DUMPSYS,
+        DEVICE_IDENTIFIER_COLLECTION,
+        NETWORK_FINGERPRINT_COLLECTION,
+        USAGE_STATS_COLLECTION,
         CONDITIONAL_BRANCH,
     }
 
     private enum class DataTag {
         VPN_SERVICE_ACTION,
         VPN_INTENT,
+        SELF_PACKAGE_NAME,
+        SELF_SCOPED_VPN_INTENT,
         VPN_QUERY_RESULT,
         BROAD_PACKAGE_RESULT,
         KNOWN_VPN_PACKAGE,
@@ -1722,21 +2990,31 @@ class AppSemanticAnalyzer @Inject constructor() {
         LOCAL_PROXY_ENDPOINT,
         VPN_TELEMETRY_VALUE,
         VPN_TELEMETRY_PAYLOAD,
+        DEVICE_FINGERPRINT_VALUE,
     }
 
     companion object {
-        const val ANALYZER_VERSION = 7
+        const val ANALYZER_VERSION = 10
+        private const val NATIVE_METHOD_ACCESS_FLAG = 0x0100
         private const val VPN_TRANSPORT_ID = 4L
+        private const val NOT_VPN_CAPABILITY_ID = 15L
         private const val MAX_SIGNALS = 100
+        private const val MAX_NATIVE_BRIDGE_SIGNALS = 24
         private const val MAX_EVIDENCE_CHAIN = 8
         private const val CANCELLATION_CHECK_CLASS_INTERVAL = 8
         private const val CANCELLATION_CHECK_METHOD_INTERVAL = 16
         private const val CANCELLATION_CHECK_INSTRUCTION_INTERVAL = 128
         private const val CANCELLATION_CHECK_NATIVE_STRING_INTERVAL = 128
+        private const val MAX_CALL_GRAPH_SIBLING_FANOUT = 12
+        private const val MAX_CALL_GRAPH_CHAIN_DEPTH = 4
+        private const val MAX_CALL_GRAPH_CHAIN_FANOUT = 12
+        private const val MAX_CALL_GRAPH_CHAIN_ROOTS = 512
+        private const val MAX_CALL_GRAPH_CHAIN_EDGES = 4096
+        private const val MAX_NATIVE_LIBRARY_SYMBOL_TEXTS = 4096
         private const val MIN_NATIVE_STRING_LENGTH = 4
         private val DEX_ENTRY_PATTERN = Regex("""classes(?:\d*)\.dex""")
         private const val MAX_TUNNEL_INTERFACE_TEXT_LENGTH = 64
-        private val TUNNEL_NAME_TOKEN_PATTERN = Regex("""^(?:tun|ppp|tap|pptp|wg)\d+$""")
+        private val TUNNEL_NAME_TOKEN_PATTERN = Regex("""^(?:(?:tun|ppp|tap|pptp|wg)\d+|ipsec\d+)$""")
         private val TUNNEL_TOKEN_SEPARATOR = Regex("""[^A-Za-z0-9]+""")
         private val PUBLIC_IP_ENDPOINTS = listOf(
             "ifconfig.me",
@@ -1761,6 +3039,8 @@ class AppSemanticAnalyzer @Inject constructor() {
             "vpn_status",
             "VpnStatus",
             "VpnStatusResponse",
+            "vpn=",
+            "&vpn=",
             "is_vpn_on",
             "installedVpn",
             "vpnClients",
@@ -1771,9 +3051,133 @@ class AppSemanticAnalyzer @Inject constructor() {
             "VpnChallenge",
             "vpn-detection-free",
         )
+        private val SPLIT_TUNNEL_TERMS = listOf(
+            "splitTunnel",
+            "split_tunnel",
+            "split-tunnel",
+            "SplitTunnel",
+            "perAppVpn",
+            "per_app_vpn",
+            "allowedApplications",
+            "disallowedApplications",
+            "allowApps",
+            "disallowApps",
+            "excludedApplications",
+            "includedApplications",
+            "bypassVpn",
+            "bypass_vpn",
+        )
+        private val SELF_PROXY_TERMS = listOf(
+            "ProxyConfig",
+            "ProxySettings",
+            "proxySettings",
+            "MtProtoProxy",
+            "MTProxy",
+            "localProxyPort",
+            "setProxy",
+            "useProxy",
+            "use_proxy",
+        )
+        private val SYSTEM_PROXY_PROPERTY_TERMS = listOf(
+            "http.proxyHost",
+            "http.proxyPort",
+            "https.proxyHost",
+            "https.proxyPort",
+            "socksProxyHost",
+            "socksProxyPort",
+        )
+        private val LOCAL_PROXY_SCAN_TERMS = listOf(
+            "PortScanner",
+            "ProxyScanner",
+            "ProxyProber",
+            "scanKnownPorts",
+            "scanFullRange",
+            "scanListeningPorts",
+            "probePort",
+            "probeSocks",
+            "probeSocks5",
+            "probeHTTP",
+            "probeGrpc",
+            "Socks5Probe",
+            "AuthProbe",
+            "MtProtoProber",
+            "MtProtoProbe",
+            "probeMtProto",
+            "supportsNoAuth",
+            "bruteForceCredentials",
+            "probeCredentials",
+            "tryProxyCredentials",
+            "fetchIpViaProxy",
+            "fetchDirectIp",
+            "LocalProxyCheckResult",
+            "ExitIPResolver",
+            "ExitIPInfo",
+            "CONNECT ifconfig.me",
+            "UDP ASSOCIATE",
+            "HandlerServiceGrpc",
+            "ListOutboundsRequest",
+            "XrayApiScanner",
+            "XrayAPIProbe",
+            "XrayAPIInfo",
+            "ClashAPIProbe",
+            "ClashAPIResult",
+            "mihomo",
+            "sing-box Clash API",
+        )
+        private val LOCAL_PROXY_SCAN_EXACT_TERMS = setOf(
+            "/connections",
+            "/proxies",
+            "/configs",
+        )
+        private val VPN_LAUNCH_METHODS = setOf(
+            "startActivity",
+            "startActivityForResult",
+            "startService",
+            "startForegroundService",
+            "bindService",
+        )
+        private val SPLIT_TUNNEL_BUILDER_METHODS = setOf(
+            "addAllowedApplication",
+            "addDisallowedApplication",
+            "allowFamily",
+        )
+        private val SELF_PROXY_BUILDER_METHODS = setOf(
+            "proxy",
+            "proxySelector",
+        )
+        private val NATIVE_LIBRARY_LOAD_METHODS = setOf(
+            "load",
+            "loadLibrary",
+        )
+        private val PROXY_INFO_INSPECTION_METHODS = setOf(
+            "getHost",
+            "getPort",
+            "getPacFileUrl",
+            "getExclusionList",
+            "isValid",
+        )
+        private val PROXY_INFO_VALUE_METHODS = setOf(
+            "getHost",
+            "getPort",
+            "getPacFileUrl",
+            "getExclusionList",
+        )
+        private val ANDROID_PROXY_INSPECTION_METHODS = setOf(
+            "getDefaultHost",
+            "getDefaultPort",
+        )
+        private val ANDROID_PROXY_VALUE_METHODS = setOf(
+            "getDefaultHost",
+            "getDefaultPort",
+        )
         private val BROAD_PACKAGE_INVENTORY_METHODS = setOf(
             "getInstalledPackages",
             "getInstalledApplications",
+        )
+        private val PACKAGE_NAME_QUERY_METHODS = setOf(
+            "getPackageInfo",
+            "getApplicationInfo",
+            "getLaunchIntentForPackage",
         )
         private val RESULT_COLLECTION_METHODS = setOf(
             "size",
@@ -1818,9 +3222,21 @@ class AppSemanticAnalyzer @Inject constructor() {
             "enqueue",
             "execute",
         )
+        private val TELEMETRY_ACCESSOR_METHOD_NAMES = setOf(
+            "toString",
+            "hashCode",
+            "equals",
+            "copy",
+            "describeContents",
+            "writeToParcel",
+        )
         private val TELEMETRY_CLASS_NAMES = setOf(
             "com.yandex.metrica.YandexMetrica",
             "com.google.firebase.analytics.FirebaseAnalytics",
+        )
+        private val TELEMETRY_CLASS_TERMS = listOf(
+            ".analytics.",
+            ".telemetry.",
         )
         private val TRACKER_SDK_CLASS_PREFIXES = listOf(
             "com.facebook.",
@@ -1870,11 +3286,139 @@ class AppSemanticAnalyzer @Inject constructor() {
             "bindProcessToNetwork",
             "setProcessDefaultNetwork",
         )
+        private val ROUTE_INSPECTION_METHODS = setOf(
+            "getRoutes",
+            "getLinkProperties",
+            "getInterfaceName",
+        )
         private val NETWORK_BINDING_METHODS = setOf(
             "bindSocket",
             "getSocketFactory",
         )
+        private val DEVICE_IDENTIFIER_TEXT_TERMS = setOf(
+            "android_id",
+            "ANDROID_ID",
+            "advertising_id",
+            "adid",
+            "gaid",
+            "app_set_id",
+            "appsetid",
+            "firebase_installation_id",
+            "installation_id",
+            "device_id",
+            "imei",
+            "meid",
+            "imsi",
+            "iccid",
+        )
+        private val NETWORK_FINGERPRINT_TEXT_TERMS = setOf(
+            "ssid",
+            "bssid",
+            "wifiSecurity",
+            "networkOperator",
+            "networkCountry",
+            "simOperator",
+            "networkType",
+            "subtype",
+            "roaming",
+            "extraInfo",
+            "networksCount",
+        )
+        private val BUILD_IDENTIFIER_FIELDS = setOf(
+            "SERIAL",
+            "FINGERPRINT",
+            "MODEL",
+            "MANUFACTURER",
+            "BRAND",
+            "DEVICE",
+            "PRODUCT",
+            "HARDWARE",
+            "BOARD",
+        )
+        private val TELEPHONY_IDENTIFIER_METHODS = setOf(
+            "getDeviceId",
+            "getImei",
+            "getMeid",
+            "getSubscriberId",
+            "getSimSerialNumber",
+            "getLine1Number",
+        )
+        private val TELEPHONY_NETWORK_FINGERPRINT_METHODS = setOf(
+            "getNetworkOperator",
+            "getNetworkOperatorName",
+            "getNetworkCountryIso",
+            "getSimOperator",
+            "getSimOperatorName",
+            "getSimCountryIso",
+            "getDataState",
+            "getDataActivity",
+            "isNetworkRoaming",
+        )
+        private val WIFI_FINGERPRINT_METHODS = setOf(
+            "getConnectionInfo",
+            "getScanResults",
+            "getSSID",
+            "getBSSID",
+            "getMacAddress",
+            "getIpAddress",
+            "getLinkSpeed",
+            "getNetworkId",
+            "isP2pSupported",
+            "isScanAlwaysAvailable",
+        )
+        private val NETWORK_INFO_FINGERPRINT_METHODS = setOf(
+            "getExtraInfo",
+            "getSubtypeName",
+            "getTypeName",
+            "getType",
+            "getSubtype",
+            "isRoaming",
+        )
+        private val NATIVE_BRIDGE_JAVA_CONTEXT_FACTS = setOf(
+            SemanticFactKind.PACKAGE_QUERY_VPN_SERVICE,
+            SemanticFactKind.BROAD_PACKAGE_INVENTORY,
+            SemanticFactKind.KNOWN_VPN_PACKAGE_REFERENCE,
+            SemanticFactKind.KNOWN_VPN_PACKAGE_CHECK,
+            SemanticFactKind.VPN_RESULT_COLLECTION,
+            SemanticFactKind.TELEMETRY_PREPARATION,
+            SemanticFactKind.TELEMETRY_OR_NETWORK_SINK,
+            SemanticFactKind.VPN_TELEMETRY_LABEL,
+            SemanticFactKind.VPN_DATA_SERIALIZATION_FLOW,
+            SemanticFactKind.VPN_DATA_NETWORK_FLOW,
+            SemanticFactKind.SYSTEM_PROXY_INSPECTION,
+            SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE,
+            SemanticFactKind.LOCAL_PROXY_SCAN_CONTEXT,
+            SemanticFactKind.PUBLIC_IP_PROBE,
+            SemanticFactKind.PUBLIC_IP_NETWORK_FLOW,
+            SemanticFactKind.NETWORK_BYPASS_BINDING,
+            SemanticFactKind.UNDERLYING_NETWORK_ENUMERATION,
+            SemanticFactKind.NETWORK_CAPABILITIES_VPN_CHECK,
+            SemanticFactKind.TUNNEL_INTERFACE_PROBE,
+            SemanticFactKind.MTU_PROBE,
+            SemanticFactKind.PROC_SOCKET_TABLE,
+            SemanticFactKind.DNS_SERVER_INSPECTION,
+            SemanticFactKind.ROUTE_TABLE_INSPECTION,
+            SemanticFactKind.ACTIVE_VPN_DUMPSYS,
+        )
+        private val NATIVE_BRIDGE_NATIVE_FACTS = setOf(
+            SemanticFactKind.KNOWN_VPN_PACKAGE_REFERENCE,
+            SemanticFactKind.SYSTEM_PROXY_INSPECTION,
+            SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE,
+            SemanticFactKind.LOCAL_PROXY_SCAN_CONTEXT,
+            SemanticFactKind.PUBLIC_IP_PROBE,
+            SemanticFactKind.NETWORK_BYPASS_BINDING,
+            SemanticFactKind.NETWORK_CAPABILITIES_VPN_CHECK,
+            SemanticFactKind.TUNNEL_INTERFACE_API,
+            SemanticFactKind.TUNNEL_INTERFACE_PROBE,
+            SemanticFactKind.MTU_PROBE,
+            SemanticFactKind.PROC_SOCKET_TABLE,
+            SemanticFactKind.DNS_SERVER_INSPECTION,
+            SemanticFactKind.ROUTE_TABLE_INSPECTION,
+            SemanticFactKind.ACTIVE_VPN_DUMPSYS,
+        )
         private val CROSS_LAYER_APP_FACTS = setOf(
+            SemanticFactKind.VPN_CLIENT_CONTROL_CONTEXT,
+            SemanticFactKind.SPLIT_TUNNEL_APP_SELECTION,
             SemanticFactKind.PACKAGE_QUERY_VPN_SERVICE,
             SemanticFactKind.BROAD_PACKAGE_INVENTORY,
             SemanticFactKind.KNOWN_VPN_PACKAGE_REFERENCE,
@@ -1884,7 +3428,12 @@ class AppSemanticAnalyzer @Inject constructor() {
             SemanticFactKind.VPN_TELEMETRY_LABEL,
             SemanticFactKind.VPN_DATA_SERIALIZATION_FLOW,
             SemanticFactKind.VPN_DATA_SDK_HANDOFF,
+            SemanticFactKind.NATIVE_METHOD_DECLARATION,
+            SemanticFactKind.NATIVE_LIBRARY_LOAD,
+            SemanticFactKind.SYSTEM_PROXY_INSPECTION,
             SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE,
+            SemanticFactKind.LOCAL_PROXY_SELF_USE_CONTEXT,
+            SemanticFactKind.LOCAL_PROXY_SCAN_CONTEXT,
             SemanticFactKind.PUBLIC_IP_PROBE,
             SemanticFactKind.PUBLIC_IP_NETWORK_FLOW,
             SemanticFactKind.NETWORK_BYPASS_BINDING,
@@ -1893,6 +3442,8 @@ class AppSemanticAnalyzer @Inject constructor() {
             SemanticFactKind.TUNNEL_INTERFACE_PROBE,
             SemanticFactKind.MTU_PROBE,
             SemanticFactKind.PROC_SOCKET_TABLE,
+            SemanticFactKind.DNS_SERVER_INSPECTION,
+            SemanticFactKind.ROUTE_TABLE_INSPECTION,
             SemanticFactKind.ACTIVE_VPN_DUMPSYS,
         )
         private val CROSS_LAYER_SDK_FACTS = setOf(
@@ -1902,7 +3453,10 @@ class AppSemanticAnalyzer @Inject constructor() {
             SemanticFactKind.VPN_DATA_SERIALIZATION_FLOW,
             SemanticFactKind.VPN_DATA_NETWORK_FLOW,
             SemanticFactKind.NETWORK_LIBRARY_CALL,
+            SemanticFactKind.SYSTEM_PROXY_INSPECTION,
             SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE,
+            SemanticFactKind.LOCAL_PROXY_SELF_USE_CONTEXT,
+            SemanticFactKind.LOCAL_PROXY_SCAN_CONTEXT,
             SemanticFactKind.PUBLIC_IP_PROBE,
             SemanticFactKind.PUBLIC_IP_NETWORK_FLOW,
             SemanticFactKind.NETWORK_BYPASS_BINDING,
@@ -1911,7 +3465,41 @@ class AppSemanticAnalyzer @Inject constructor() {
             SemanticFactKind.TUNNEL_INTERFACE_PROBE,
             SemanticFactKind.MTU_PROBE,
             SemanticFactKind.PROC_SOCKET_TABLE,
+            SemanticFactKind.DNS_SERVER_INSPECTION,
+            SemanticFactKind.ROUTE_TABLE_INSPECTION,
             SemanticFactKind.ACTIVE_VPN_DUMPSYS,
+        )
+        private val CALL_GRAPH_COORDINATOR_FACTS = setOf(
+            SemanticFactKind.VPN_CLIENT_CONTROL_CONTEXT,
+            SemanticFactKind.SPLIT_TUNNEL_APP_SELECTION,
+            SemanticFactKind.PACKAGE_QUERY_VPN_SERVICE,
+            SemanticFactKind.KNOWN_VPN_PACKAGE_CHECK,
+            SemanticFactKind.VPN_RESULT_COLLECTION,
+            SemanticFactKind.TELEMETRY_PREPARATION,
+            SemanticFactKind.TELEMETRY_OR_NETWORK_SINK,
+            SemanticFactKind.VPN_TELEMETRY_LABEL,
+            SemanticFactKind.VPN_DATA_SERIALIZATION_FLOW,
+            SemanticFactKind.NETWORK_CAPABILITIES_VPN_CHECK,
+            SemanticFactKind.SYSTEM_PROXY_INSPECTION,
+            SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE,
+            SemanticFactKind.LOCAL_PROXY_SCAN_CONTEXT,
+            SemanticFactKind.PUBLIC_IP_PROBE,
+            SemanticFactKind.NETWORK_BYPASS_BINDING,
+        )
+        private val CALL_GRAPH_COORDINATOR_METHOD_TERMS = listOf(
+            "vpn",
+            "proxy",
+            "scan",
+            "detect",
+            "check",
+            "probe",
+            "collect",
+            "report",
+            "telemetry",
+            "risk",
+            "security",
+            "inspect",
+            "verify",
         )
         private val PLATFORM_CLASS_PREFIXES = listOf(
             "android.",

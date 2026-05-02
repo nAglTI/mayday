@@ -5,10 +5,13 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import org.debs.mayday.core.model.AppRiskLevel
 import org.debs.mayday.core.model.AppSemanticAnalysisResult
 import org.debs.mayday.core.model.AppSemanticEvidenceSource
+import org.debs.mayday.core.model.AppSemanticProofLevel
 import org.debs.mayday.core.model.AppSemanticRiskBucket
 import org.debs.mayday.core.model.AppSemanticRiskScope
 import org.debs.mayday.core.model.AppSemanticSignal
 import org.debs.mayday.core.model.AppSemanticSignalType
+import org.debs.mayday.core.model.AppSemanticVerdictConfidence
+import org.debs.mayday.core.model.AppSemanticVerdictStatus
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -122,6 +125,11 @@ class AppSemanticCacheStore @Inject constructor(
         return JSONObject()
             .put("score", score)
             .put("risk_level", riskLevel.name)
+            .put("proof_confidence", proofConfidence)
+            .put("proof_level", proofLevel.name)
+            .put("verdict_confidence", verdictConfidence)
+            .put("verdict_level", verdictLevel.name)
+            .put("verdict_status", verdictStatus.name)
             .put("signals", signals.toSignalsJsonArray())
             .put("app_code_risk", appCodeRisk.toJson())
             .put("sdk_code_risk", sdkCodeRisk.toJson())
@@ -139,6 +147,8 @@ class AppSemanticCacheStore @Inject constructor(
         return JSONObject()
             .put("score", score)
             .put("risk_level", riskLevel.name)
+            .put("proof_confidence", proofConfidence)
+            .put("proof_level", proofLevel.name)
             .put("signals", signals.toSignalsJsonArray())
     }
 
@@ -149,6 +159,9 @@ class AppSemanticCacheStore @Inject constructor(
             .put("description", description)
             .put("evidence", evidence)
             .put("confidence", confidence)
+            .put("proof_confidence", proofConfidence)
+            .put("proof_level", proofLevel.name)
+            .put("proof_reason", proofReason)
             .put("scope", scope.name)
             .put("source", source.name)
             .put("evidence_chain", evidenceChain.toStringJsonArray())
@@ -181,6 +194,33 @@ class AppSemanticCacheStore @Inject constructor(
             cfgEdgeCount = optInt("cfg_edge_count", 0),
             dfgEdgeCount = optInt("dfg_edge_count", 0),
             scannedAtEpochMillis = optLong("scanned_at_epoch_millis", 0L),
+            proofConfidence = optInt("proof_confidence", 0),
+            proofLevel = optEnum(
+                "proof_level",
+                AppSemanticProofLevel.from(optInt("proof_confidence", 0)),
+            ),
+            verdictConfidence = optInt("verdict_confidence", fallbackVerdictConfidence()),
+            verdictLevel = optEnum(
+                "verdict_level",
+                AppSemanticProofLevel.from(optInt("verdict_confidence", fallbackVerdictConfidence())),
+            ),
+            verdictStatus = optEnum("verdict_status", fallbackVerdictStatus()),
+        )
+    }
+
+    private fun JSONObject.fallbackVerdictConfidence(): Int {
+        return AppSemanticVerdictConfidence.from(
+            score = optInt("score", 0),
+            riskLevel = optEnum("risk_level", AppRiskLevel.CLEAN),
+            threatProofConfidence = optInt("proof_confidence", 0),
+        )
+    }
+
+    private fun JSONObject.fallbackVerdictStatus(): AppSemanticVerdictStatus {
+        return AppSemanticVerdictConfidence.statusFor(
+            score = optInt("score", 0),
+            riskLevel = optEnum("risk_level", AppRiskLevel.CLEAN),
+            threatProofConfidence = optInt("proof_confidence", 0),
         )
     }
 
@@ -190,6 +230,11 @@ class AppSemanticCacheStore @Inject constructor(
             score = optInt("score", 0),
             riskLevel = optEnum("risk_level", AppRiskLevel.CLEAN),
             signals = optJSONArray("signals").toSignals(),
+            proofConfidence = optInt("proof_confidence", 0),
+            proofLevel = optEnum(
+                "proof_level",
+                AppSemanticProofLevel.from(optInt("proof_confidence", 0)),
+            ),
         )
     }
 
@@ -198,6 +243,7 @@ class AppSemanticCacheStore @Inject constructor(
         return buildList {
             for (index in 0 until length()) {
                 val json = optJSONObject(index) ?: continue
+                val proofConfidence = json.optInt("proof_confidence", json.optInt("confidence", 0))
                 add(
                     AppSemanticSignal(
                         type = json.optEnum("type", AppSemanticSignalType.COMBINATION),
@@ -211,6 +257,12 @@ class AppSemanticCacheStore @Inject constructor(
                             .ifEmpty {
                                 json.optString("evidence").takeIf(String::isNotBlank)?.let(::listOf).orEmpty()
                             },
+                        proofConfidence = proofConfidence,
+                        proofLevel = json.optEnum(
+                            "proof_level",
+                            AppSemanticProofLevel.from(proofConfidence),
+                        ),
+                        proofReason = json.optString("proof_reason"),
                     ),
                 )
             }

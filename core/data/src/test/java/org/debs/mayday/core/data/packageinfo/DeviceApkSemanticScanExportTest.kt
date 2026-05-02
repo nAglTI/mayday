@@ -1,5 +1,6 @@
 package org.debs.mayday.core.data.packageinfo
 
+import net.dongliu.apk.parser.ApkFile
 import org.debs.mayday.core.model.AppSemanticAnalysisResult
 import org.debs.mayday.core.model.AppSemanticRiskBucket
 import org.debs.mayday.core.model.AppSemanticSignal
@@ -19,18 +20,22 @@ class DeviceApkSemanticScanExportTest {
 
     @Test
     fun scanExportedDeviceApks() {
-        assumeTrue("Enable with -Dsemantic.scanDeviceApks=true", property("semantic.scanDeviceApks") == "true")
+        assumeTrue(
+            "Enable with -Dsemantic.scanDeviceApks=true or -Dsemantic.scanApkCorpus=true",
+            property("semantic.scanDeviceApks") == "true" || property("semantic.scanApkCorpus") == "true",
+        )
 
         val inputRoot = File(
-            property("semantic.deviceApksRoot")
-                ?: "../../docs/internalDocs/device_apks",
+            property("semantic.apkCorpusRoot")
+                ?: property("semantic.deviceApksRoot")
+                ?: defaultCorpusRoot().path,
         ).canonicalFile
         assertTrue("Device APK root is missing: $inputRoot", inputRoot.isDirectory)
 
         val timestamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").format(LocalDateTime.now())
         val outputRoot = File(
             property("semantic.scanOutput")
-                ?: "../../docs/internalDocs/semantic_scan_results/$timestamp",
+                ?: defaultOutputRoot(inputRoot, timestamp).path,
         ).canonicalFile
         val packageOutputRoot = File(outputRoot, "packages")
         packageOutputRoot.mkdirs()
@@ -41,31 +46,30 @@ class DeviceApkSemanticScanExportTest {
             ?: Runtime.getRuntime().availableProcessors().coerceAtMost(4).coerceAtLeast(1)
         val rescan = property("semantic.rescan") == "true"
         val maxPackages = property("semantic.maxPackages")?.toIntOrNull()?.takeIf { it > 0 }
-
-        val devices = inputRoot.listFiles(File::isDirectory)
+        val packageFilter = property("semantic.packages")
+            ?.split(',', ';', ' ', '\n', '\r', '\t')
+            ?.map(String::trim)
+            ?.filter(String::isNotEmpty)
+            ?.toSet()
             .orEmpty()
-            .sortedBy(File::getName)
-            .mapNotNull(::deviceScanInput)
-        assertTrue("No device APK directories under $inputRoot", devices.isNotEmpty())
 
-        val allPackages = devices.flatMap { device ->
-            device.packageDirs.map { packageDir ->
-                PackageScanInput(
-                    device = device,
-                    packageName = packageDir.name,
-                    packageDir = packageDir,
-                    apkFiles = packageDir.walkTopDown()
-                        .filter { it.isFile && it.extension.equals("apk", ignoreCase = true) }
-                        .sortedBy { it.name }
-                        .toList(),
-                )
+        val allPackages = corpusScanInputs(inputRoot)
+            .let { packages ->
+                if (packageFilter.isEmpty()) {
+                    packages
+                } else {
+                    packages.filter { input -> input.packageName in packageFilter }
+                }
             }
-        }
-            .filter { it.apkFiles.isNotEmpty() }
             .let { packages -> maxPackages?.let(packages::take) ?: packages }
+        val devices = allPackages
+            .map(PackageScanInput::device)
+            .distinctBy(DeviceScanInput::id)
+            .sortedBy(DeviceScanInput::id)
 
-        assertTrue("No APK files found under $inputRoot", allPackages.isNotEmpty())
-        println("Semantic scan input: devices=${devices.size}, packages=${allPackages.size}, workers=$workerCount, output=$outputRoot")
+        assertTrue("No APK files found under $inputRoot for filter=$packageFilter", allPackages.isNotEmpty())
+        assertTrue("No APK groups found under $inputRoot", devices.isNotEmpty())
+        println("Semantic scan input: groups=${devices.size}, packages=${allPackages.size}, workers=$workerCount, output=$outputRoot")
 
         val completed = AtomicInteger(0)
         val executor = Executors.newFixedThreadPool(workerCount)
@@ -133,19 +137,100 @@ class DeviceApkSemanticScanExportTest {
         println("Semantic APK CSV: ${File(outputRoot, "semantic_scan_apks.csv").canonicalPath}")
     }
 
-    private fun deviceScanInput(deviceDir: File): DeviceScanInput? {
-        val apkRoot = File(deviceDir, "apks").takeIf(File::isDirectory) ?: return null
-        val manifest = File(deviceDir, "apk_export_manifest.json").takeIf(File::isFile)
-        val manifestText = manifest?.readText().orEmpty()
-        return DeviceScanInput(
-            id = deviceDir.name,
-            dir = deviceDir,
-            serial = manifestText.jsonString("serial").orEmpty(),
-            brand = manifestText.jsonString("brand").orEmpty(),
-            model = manifestText.jsonString("model").orEmpty(),
-            includeSystem = manifestText.jsonBoolean("include_system"),
-            packageDirs = apkRoot.listFiles(File::isDirectory).orEmpty().sortedBy(File::getName),
+    private fun corpusScanInputs(inputRoot: File): List<PackageScanInput> {
+        val inputs = mutableListOf<PackageScanInput>()
+        fun device(
+            id: String,
+            label: String,
+            dir: File,
+            packageDirs: List<File>,
+        ) = DeviceScanInput(
+            id = id,
+            dir = dir,
+            serial = "",
+            brand = label,
+            model = "",
+            includeSystem = false,
+            packageDirs = packageDirs,
         )
+
+        fun addSingleApkDirectory(
+            id: String,
+            label: String,
+            dir: File,
+        ) {
+            if (!dir.isDirectory) return
+            val apks = dir.listFiles { file -> file.isFile && file.extension.equals("apk", ignoreCase = true) }
+                .orEmpty()
+                .sortedBy(File::getName)
+            val scanDevice = device(id, label, dir, apks)
+            apks.forEach { apk ->
+                inputs += PackageScanInput(
+                    device = scanDevice,
+                    packageName = apk.packageNameFromManifest() ?: apk.nameWithoutExtension,
+                    packageDir = dir,
+                    apkFiles = listOf(apk),
+                )
+            }
+        }
+
+        addSingleApkDirectory("black", "black", File(inputRoot, "black"))
+        addSingleApkDirectory("white", "white", File(inputRoot, "white"))
+        addSingleApkDirectory("gray_high", "gray/high", File(inputRoot, "gray/high"))
+        addSingleApkDirectory("gray_low", "gray/low", File(inputRoot, "gray/low"))
+
+        val splitRoot = File(inputRoot, "apks/apks")
+        if (splitRoot.isDirectory) {
+            val packageDirs = splitRoot.listFiles(File::isDirectory)
+                .orEmpty()
+                .sortedBy(File::getName)
+            val scanDevice = device("apks", "apks", splitRoot, packageDirs)
+            packageDirs.forEach { packageDir ->
+                val apkFiles = packageDir.walkTopDown()
+                    .filter { it.isFile && it.extension.equals("apk", ignoreCase = true) }
+                    .sortedBy { it.name }
+                    .toList()
+                if (apkFiles.isNotEmpty()) {
+                    inputs += PackageScanInput(
+                        device = scanDevice,
+                        packageName = packageDir.name,
+                        packageDir = packageDir,
+                        apkFiles = apkFiles,
+                    )
+                }
+            }
+        }
+
+        return inputs.sortedWith(
+            compareBy<PackageScanInput> { it.device.id }
+                .thenBy { it.packageName }
+                .thenBy { it.packageDir.name },
+        )
+    }
+
+    private fun defaultCorpusRoot(): File {
+        val userDir = File(System.getProperty("user.dir") ?: ".").canonicalFile
+        return listOf(
+            File(userDir, "analize/apk"),
+            File(userDir, "../../analize/apk"),
+            File(userDir, "../analize/apk"),
+            File(userDir, "../../../analize/apk"),
+        ).firstOrNull(File::isDirectory)
+            ?: File(userDir, "../../analize/apk")
+    }
+
+    private fun defaultOutputRoot(
+        inputRoot: File,
+        timestamp: String,
+    ): File {
+        val projectRoot = inputRoot.parentFile?.parentFile
+        return File(projectRoot ?: File(System.getProperty("user.dir") ?: "."), "build/semantic_scan_results/$timestamp")
+    }
+
+    private fun File.packageNameFromManifest(): String? {
+        return runCatching {
+            ApkFile(this).use { apk -> apk.apkMeta.packageName }
+        }.getOrNull()?.takeIf(String::isNotBlank)
     }
 
     private fun packageResultFile(
@@ -183,6 +268,11 @@ class DeviceApkSemanticScanExportTest {
                 append(",\n")
                 append("  \"score\": ${analysis.score},\n")
                 append("  \"risk_level\": ${analysis.riskLevel.name.json()},\n")
+                append("  \"proof_confidence\": ${analysis.proofConfidence},\n")
+                append("  \"proof_level\": ${analysis.proofLevel.name.json()},\n")
+                append("  \"verdict_confidence\": ${analysis.verdictConfidence},\n")
+                append("  \"verdict_level\": ${analysis.verdictLevel.name.json()},\n")
+                append("  \"verdict_status\": ${analysis.verdictStatus.name.json()},\n")
                 append("  \"methods_analyzed\": ${analysis.methodsAnalyzed},\n")
                 append("  \"cfg_node_count\": ${analysis.cfgNodeCount},\n")
                 append("  \"cfg_edge_count\": ${analysis.cfgEdgeCount},\n")
@@ -264,6 +354,11 @@ class DeviceApkSemanticScanExportTest {
                 "status",
                 "risk_level",
                 "score",
+                "proof_level",
+                "proof_confidence",
+                "verdict_status",
+                "verdict_level",
+                "verdict_confidence",
                 "duration_ms",
                 "apk_count",
                 "total_apk_bytes",
@@ -287,6 +382,11 @@ class DeviceApkSemanticScanExportTest {
                     json.stringValue("status").orEmpty(),
                     json.stringValue("risk_level").orEmpty(),
                     json.numberValue("score"),
+                    json.stringValue("proof_level").orEmpty(),
+                    json.numberValue("proof_confidence"),
+                    json.stringValue("verdict_status").orEmpty(),
+                    json.stringValue("verdict_level").orEmpty(),
+                    json.numberValue("verdict_confidence"),
                     json.numberValue("duration_ms"),
                     json.numberValue("apk_count"),
                     json.numberValue("total_apk_bytes"),
@@ -333,6 +433,8 @@ class DeviceApkSemanticScanExportTest {
             append("{")
             append("\"score\": $score, ")
             append("\"risk_level\": ${riskLevel.name.json()}, ")
+            append("\"proof_confidence\": $proofConfidence, ")
+            append("\"proof_level\": ${proofLevel.name.json()}, ")
             append("\"signal_count\": ${signals.size}")
             append("}")
         }
@@ -345,6 +447,9 @@ class DeviceApkSemanticScanExportTest {
             append("$indent  \"title\": ${title.json()},\n")
             append("$indent  \"description\": ${description.json()},\n")
             append("$indent  \"confidence\": $confidence,\n")
+            append("$indent  \"proof_confidence\": $proofConfidence,\n")
+            append("$indent  \"proof_level\": ${proofLevel.name.json()},\n")
+            append("$indent  \"proof_reason\": ${proofReason.json()},\n")
             append("$indent  \"scope\": ${scope.name.json()},\n")
             append("$indent  \"source\": ${source.name.json()},\n")
             append("$indent  \"evidence\": ${evidence.json()},\n")

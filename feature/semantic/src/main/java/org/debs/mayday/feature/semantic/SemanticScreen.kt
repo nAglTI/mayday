@@ -52,10 +52,12 @@ import org.debs.mayday.core.model.AppLanguage
 import org.debs.mayday.core.model.AppRiskLevel
 import org.debs.mayday.core.model.AppSemanticAnalysisResult
 import org.debs.mayday.core.model.AppSemanticEvidenceSource
+import org.debs.mayday.core.model.AppSemanticProofLevel
 import org.debs.mayday.core.model.AppSemanticRiskBucket
 import org.debs.mayday.core.model.AppSemanticRiskScope
 import org.debs.mayday.core.model.AppSemanticSignal
 import org.debs.mayday.core.model.AppSemanticSignalType
+import org.debs.mayday.core.model.AppSemanticVerdictStatus
 import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -486,16 +488,25 @@ private fun SemanticBadge(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
             }
-            Text(
-                text = when {
-                    isScanning -> text.analyzing
-                    result.scannedAtEpochMillis == 0L -> text.pending
-                    else -> "${text.level(result.riskLevel)} · ${result.score}"
-                },
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = color,
-            )
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    text = when {
+                        isScanning -> text.analyzing
+                        result.scannedAtEpochMillis == 0L -> text.pending
+                        else -> "${text.level(result.riskLevel)} · ${result.score}"
+                    },
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = color,
+                )
+                if (!isScanning && result.scannedAtEpochMillis != 0L) {
+                    Text(
+                        text = "${text.verdictStatus(result.verdictStatus)} · ${result.verdictConfidence}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = color.copy(alpha = 0.82f),
+                    )
+                }
+            }
         }
     }
 }
@@ -541,6 +552,15 @@ private fun SemanticDetailsSheet(
                     isScanning = isScanning,
                     text = text,
                 )
+            }
+            if (!isScanning && item.analysis.scannedAtEpochMillis != 0L) {
+                item {
+                    Text(
+                        text = text.verdictHint(item.analysis),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
             item { SemanticRiskBuckets(result = item.analysis, text = text) }
             item {
@@ -602,7 +622,10 @@ private fun SemanticBucketRow(
     bucket: AppSemanticRiskBucket,
     text: SemanticText,
 ) {
-    MaydayStatRow(label = label, value = "${text.level(bucket.riskLevel)} · ${bucket.score}")
+    MaydayStatRow(
+        label = label,
+        value = "${text.level(bucket.riskLevel)} · ${bucket.score} / ${text.proofLevel(bucket.proofLevel)} · ${bucket.proofConfidence}",
+    )
 }
 
 @Composable
@@ -631,15 +654,27 @@ private fun SemanticSignalRow(
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
-                Text(
-                    text = "+${signal.confidence}",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        text = "${text.risk} +${signal.confidence}",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = "${text.proof} ${signal.proofConfidence}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
             Text(
-                text = "${text.scope(signal.scope)} · ${text.source(signal.source)}",
+                text = "${text.scope(signal.scope)} · ${text.source(signal.source)} · ${text.proofLevel(signal.proofLevel)}",
                 style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = signal.proofReason.ifBlank { text.signalProofHint(signal) },
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
@@ -707,12 +742,20 @@ private data class SemanticText(
     val signals: String,
     val noSignals: String,
     val riskBlocks: String,
+    val risk: String,
+    val proof: String,
+    val verdictConfidence: String,
     val appCode: String,
     val sdkCode: String,
     val nativeCode: String,
     val manifestOnly: String,
     val crossLayer: String,
     val level: (AppRiskLevel) -> String,
+    val proofLevel: (AppSemanticProofLevel) -> String,
+    val proofHint: (AppSemanticAnalysisResult) -> String,
+    val verdictHint: (AppSemanticAnalysisResult) -> String,
+    val verdictStatus: (AppSemanticVerdictStatus) -> String,
+    val signalProofHint: (AppSemanticSignal) -> String,
     val signalType: (AppSemanticSignalType) -> String,
     val scope: (AppSemanticRiskScope) -> String,
     val source: (AppSemanticEvidenceSource) -> String,
@@ -765,6 +808,9 @@ private fun semanticText(language: AppLanguage): SemanticText {
             signals = "сигналы",
             noSignals = "Семантических сигналов не найдено",
             riskBlocks = "блоки риска",
+            risk = "риск",
+            proof = "доказанность",
+            verdictConfidence = "вердикт",
             appCode = "код приложения",
             sdkCode = "код SDK",
             nativeCode = "native-код",
@@ -777,6 +823,54 @@ private fun semanticText(language: AppLanguage): SemanticText {
                     AppRiskLevel.MEDIUM -> "средний"
                     AppRiskLevel.HIGH -> "высокий"
                     AppRiskLevel.CRITICAL -> "critical"
+                }
+            },
+            proofLevel = { level ->
+                when (level) {
+                    AppSemanticProofLevel.LOW -> "низкая"
+                    AppSemanticProofLevel.MEDIUM -> "средняя"
+                    AppSemanticProofLevel.HIGH -> "высокая"
+                }
+            },
+            proofHint = { result ->
+                when (result.proofLevel) {
+                    AppSemanticProofLevel.HIGH -> {
+                        "Семантическая цепочка доказана: найденные проверки связаны data/control flow или цельной цепочкой вызовов. При высоком риске это можно считать вредным поведением."
+                    }
+                    AppSemanticProofLevel.MEDIUM -> {
+                        "Есть частичная семантическая связь или несколько независимых проверок. Риск учитывается, но финальная цепочка доказана не полностью."
+                    }
+                    AppSemanticProofLevel.LOW -> {
+                        "Найдены только слабые признаки, manifest/native-упоминания или одиночные проверки. Это диагностический след, а не доказательство вредного поведения."
+                    }
+                }
+            },
+            verdictHint = { result ->
+                val matrix = "Итог берётся из матрицы score × доказанность угрозы."
+                when (result.verdictStatus) {
+                    AppSemanticVerdictStatus.PROVEN_CLEAN -> "$matrix Сигналов угрозы нет: чистота доказана."
+                    AppSemanticVerdictStatus.PROVEN_LOW_RISK -> "$matrix Есть только слабые диагностические следы: доказан низкий риск."
+                    AppSemanticVerdictStatus.UNPROVEN_THREAT -> "$matrix Score показывает подозрение, но угроза не доказана."
+                    AppSemanticVerdictStatus.PARTIAL_THREAT -> "$matrix Угроза частично доказана: нужна ручная проверка цепочки."
+                    AppSemanticVerdictStatus.PROVEN_THREAT -> "$matrix Угроза доказана связанной семантической цепочкой."
+                    AppSemanticVerdictStatus.INCONSISTENT -> "$matrix Метрики конфликтуют: score и доказанность угрозы дают разные выводы."
+                }
+            },
+            verdictStatus = { status ->
+                when (status) {
+                    AppSemanticVerdictStatus.PROVEN_CLEAN -> "доказана чистота"
+                    AppSemanticVerdictStatus.PROVEN_LOW_RISK -> "доказан низкий риск"
+                    AppSemanticVerdictStatus.UNPROVEN_THREAT -> "угроза не доказана"
+                    AppSemanticVerdictStatus.PARTIAL_THREAT -> "угроза частично доказана"
+                    AppSemanticVerdictStatus.PROVEN_THREAT -> "угроза доказана"
+                    AppSemanticVerdictStatus.INCONSISTENT -> "конфликт метрик"
+                }
+            },
+            signalProofHint = { signal ->
+                when (signal.proofLevel) {
+                    AppSemanticProofLevel.HIGH -> "Доказано семантически: признаки находятся в связанной цепочке."
+                    AppSemanticProofLevel.MEDIUM -> "Частичное доказательство: связь неполная или состоит из отдельных проверок."
+                    AppSemanticProofLevel.LOW -> "Низкая доказанность: упоминание или одиночный диагностический признак."
                 }
             },
             signalType = { type ->
@@ -830,6 +924,9 @@ private fun semanticText(language: AppLanguage): SemanticText {
             signals = "signals",
             noSignals = "No semantic signals detected",
             riskBlocks = "risk blocks",
+            risk = "risk",
+            proof = "proof",
+            verdictConfidence = "verdict",
             appCode = "application code",
             sdkCode = "SDK code",
             nativeCode = "native code",
@@ -842,6 +939,54 @@ private fun semanticText(language: AppLanguage): SemanticText {
                     AppRiskLevel.MEDIUM -> "medium"
                     AppRiskLevel.HIGH -> "high"
                     AppRiskLevel.CRITICAL -> "critical"
+                }
+            },
+            proofLevel = { level ->
+                when (level) {
+                    AppSemanticProofLevel.LOW -> "low"
+                    AppSemanticProofLevel.MEDIUM -> "medium"
+                    AppSemanticProofLevel.HIGH -> "high"
+                }
+            },
+            proofHint = { result ->
+                when (result.proofLevel) {
+                    AppSemanticProofLevel.HIGH -> {
+                        "The semantic chain is proven through data/control flow or one connected call chain. High risk with high proof can be treated as malicious behavior."
+                    }
+                    AppSemanticProofLevel.MEDIUM -> {
+                        "The analysis found partial semantic links or multiple independent checks. Risk is counted, but the final chain is not fully proven."
+                    }
+                    AppSemanticProofLevel.LOW -> {
+                        "Only weak diagnostics, manifest/native mentions, or standalone checks were found. This is a diagnostic trace, not proof of malicious behavior."
+                    }
+                }
+            },
+            verdictHint = { result ->
+                val matrix = "The result comes from a score × threat-proof matrix."
+                when (result.verdictStatus) {
+                    AppSemanticVerdictStatus.PROVEN_CLEAN -> "$matrix No threat signal was found: clean verdict is proven."
+                    AppSemanticVerdictStatus.PROVEN_LOW_RISK -> "$matrix Only weak diagnostics were found: low risk is proven."
+                    AppSemanticVerdictStatus.UNPROVEN_THREAT -> "$matrix Score is suspicious, but the threat is not proven."
+                    AppSemanticVerdictStatus.PARTIAL_THREAT -> "$matrix Threat is partially proven; inspect the chain manually."
+                    AppSemanticVerdictStatus.PROVEN_THREAT -> "$matrix Threat is proven by a connected semantic chain."
+                    AppSemanticVerdictStatus.INCONSISTENT -> "$matrix Metrics conflict: score and threat proof point to different conclusions."
+                }
+            },
+            verdictStatus = { status ->
+                when (status) {
+                    AppSemanticVerdictStatus.PROVEN_CLEAN -> "clean proven"
+                    AppSemanticVerdictStatus.PROVEN_LOW_RISK -> "low risk proven"
+                    AppSemanticVerdictStatus.UNPROVEN_THREAT -> "threat unproven"
+                    AppSemanticVerdictStatus.PARTIAL_THREAT -> "threat partially proven"
+                    AppSemanticVerdictStatus.PROVEN_THREAT -> "threat proven"
+                    AppSemanticVerdictStatus.INCONSISTENT -> "metric conflict"
+                }
+            },
+            signalProofHint = { signal ->
+                when (signal.proofLevel) {
+                    AppSemanticProofLevel.HIGH -> "Semantically proven: evidence is in a connected chain."
+                    AppSemanticProofLevel.MEDIUM -> "Partially proven: the link is incomplete or made of separate checks."
+                    AppSemanticProofLevel.LOW -> "Low proof: mention or standalone diagnostic signal."
                 }
             },
             signalType = { type ->

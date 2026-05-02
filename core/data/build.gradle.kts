@@ -1,4 +1,5 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.gradle.api.tasks.testing.Test
 
 plugins {
     alias(libs.plugins.android.library)
@@ -24,6 +25,14 @@ kotlin {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)
     }
+}
+
+tasks.withType<Test>().configureEach {
+    providers.gradleProperty("mayday.test.maxHeap")
+        .orElse(providers.environmentVariable("MAYDAY_TEST_MAX_HEAP"))
+        .orNull
+        ?.takeIf { it.isNotBlank() }
+        ?.let { maxHeapSize = it }
 }
 
 dependencies {
