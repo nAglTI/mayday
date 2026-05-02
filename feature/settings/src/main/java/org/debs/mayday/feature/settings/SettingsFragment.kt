@@ -94,6 +94,9 @@ class SettingsFragment : Fragment() {
                                 SettingsUiEffect.NavigateToSplit -> {
                                     findNavController().navigate("mayday://split".toUri())
                                 }
+                                SettingsUiEffect.NavigateToSemantic -> {
+                                    findNavController().navigate("mayday://semantic".toUri())
+                                }
                                 SettingsUiEffect.OpenConfigPicker -> {
                                     importConfigLauncher.launch(arrayOf("*/*"))
                                 }

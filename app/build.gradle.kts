@@ -69,6 +69,7 @@ dependencies {
     implementation(project(":feature:home"))
     implementation(project(":feature:settings"))
     implementation(project(":feature:split"))
+    implementation(project(":feature:semantic"))
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
 
     implementation(platform(libs.androidx.compose.bom))

@@ -12,7 +12,9 @@ import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import org.debs.mayday.core.data.packageinfo.DefaultInstalledAppsRepository
+import org.debs.mayday.core.data.packageinfo.DefaultSemanticAnalysisRepository
 import org.debs.mayday.core.data.packageinfo.InstalledAppsRepository
+import org.debs.mayday.core.data.packageinfo.SemanticAnalysisRepository
 import org.debs.mayday.core.data.repository.DefaultUiPreferencesRepository
 import org.debs.mayday.core.data.repository.DefaultVpnProfileRepository
 import org.debs.mayday.core.data.repository.UiPreferencesRepository
@@ -34,6 +36,12 @@ abstract class DataBindingsModule {
     abstract fun bindInstalledAppsRepository(
         repository: DefaultInstalledAppsRepository,
     ): InstalledAppsRepository
+
+    @Binds
+    @Singleton
+    abstract fun bindSemanticAnalysisRepository(
+        repository: DefaultSemanticAnalysisRepository,
+    ): SemanticAnalysisRepository
 
     @Binds
     @Singleton

@@ -243,6 +243,12 @@ internal fun SettingsScreen(
                                 modifier = Modifier.fillMaxWidth(),
                                 filled = false,
                             )
+                            MaydayActionButton(
+                                text = semanticAnalysisLabel(strings),
+                                onClick = { onEvent(SettingsUiEvent.OpenSemanticClicked) },
+                                modifier = Modifier.fillMaxWidth(),
+                                filled = false,
+                            )
                         }
                     }
                 }
@@ -737,5 +743,12 @@ private fun routingSummary(
         SplitTunnelMode.DISABLED -> strings.allTraffic
         SplitTunnelMode.ONLY_SELECTED -> "${strings.onlySelected} ($count)"
         SplitTunnelMode.EXCLUDE_SELECTED -> "${strings.exceptSelected} ($count)"
+    }
+}
+
+private fun semanticAnalysisLabel(strings: MaydayStrings): String {
+    return when (strings.locale) {
+        AppLanguage.RU -> "Семантический анализ APK"
+        AppLanguage.EN -> "Semantic APK analysis"
     }
 }

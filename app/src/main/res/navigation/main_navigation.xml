@@ -46,4 +46,11 @@
         android:label="@string/split_title">
         <deepLink app:uri="mayday://split" />
     </fragment>
+
+    <fragment
+        android:id="@+id/semanticFragment"
+        android:name="org.debs.mayday.feature.semantic.SemanticFragment"
+        android:label="@string/app_name">
+        <deepLink app:uri="mayday://semantic" />
+    </fragment>
 </navigation>

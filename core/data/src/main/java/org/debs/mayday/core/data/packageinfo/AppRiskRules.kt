@@ -18,7 +18,7 @@ internal data class RiskStringRule(
 )
 
 internal object AppRiskRules {
-    const val RULES_VERSION = 14
+    const val RULES_VERSION = 15
     const val TUNNEL_INTERFACE_INDICATOR = "tun/ppp/tap/pptp/wg interface name"
 
     val knownApps = listOf(
@@ -500,16 +500,16 @@ internal object AppRiskRules {
         RiskStringRule(AppRiskFindingType.PUBLIC_IP, "mobileproxy.passport.yandex.net/tmgrdfrend/checkvpn", AppRiskSignalStrength.HIGH),
         RiskStringRule(AppRiskFindingType.PUBLIC_IP, "relay-api.eu.2gis.com/v1/vpn-detection-free", AppRiskSignalStrength.HIGH),
         RiskStringRule(AppRiskFindingType.PUBLIC_IP, "vpn-detection-free", AppRiskSignalStrength.HIGH),
-//        RiskStringRule(AppRiskFindingType.BYPASS, "UnderlyingNetworkProber", AppRiskSignalStrength.HIGH),
-//        RiskStringRule(AppRiskFindingType.BYPASS, "VPN_GATEWAY_LEAK", AppRiskSignalStrength.HIGH),
-//        RiskStringRule(AppRiskFindingType.BYPASS, "VPN_NETWORK_BINDING", AppRiskSignalStrength.HIGH),
-//        RiskStringRule(AppRiskFindingType.BYPASS, "SPLIT_TUNNEL_BYPASS", AppRiskSignalStrength.HIGH),
-//        RiskStringRule(AppRiskFindingType.BYPASS, "PublicIpNetworkComparison", AppRiskSignalStrength.MEDIUM),
-//        RiskStringRule(AppRiskFindingType.BYPASS, "AndroidNetworkBinding", AppRiskSignalStrength.HIGH),
-//        RiskStringRule(AppRiskFindingType.BYPASS, "OsDeviceBinding", AppRiskSignalStrength.HIGH),
-//        RiskStringRule(AppRiskFindingType.BYPASS, "BindToDeviceSocketFactory", AppRiskSignalStrength.HIGH),
-//        RiskStringRule(AppRiskFindingType.BYPASS, "ResolverBinding", AppRiskSignalStrength.MEDIUM),
-//        RiskStringRule(AppRiskFindingType.BYPASS, "TunProbeDiagnostics", AppRiskSignalStrength.MEDIUM),
+        RiskStringRule(AppRiskFindingType.BYPASS, "UnderlyingNetworkProber", AppRiskSignalStrength.HIGH),
+        RiskStringRule(AppRiskFindingType.BYPASS, "VPN_GATEWAY_LEAK", AppRiskSignalStrength.HIGH),
+        RiskStringRule(AppRiskFindingType.BYPASS, "VPN_NETWORK_BINDING", AppRiskSignalStrength.HIGH),
+        RiskStringRule(AppRiskFindingType.BYPASS, "SPLIT_TUNNEL_BYPASS", AppRiskSignalStrength.HIGH),
+        RiskStringRule(AppRiskFindingType.BYPASS, "PublicIpNetworkComparison", AppRiskSignalStrength.MEDIUM),
+        RiskStringRule(AppRiskFindingType.BYPASS, "AndroidNetworkBinding", AppRiskSignalStrength.HIGH),
+        RiskStringRule(AppRiskFindingType.BYPASS, "OsDeviceBinding", AppRiskSignalStrength.HIGH),
+        RiskStringRule(AppRiskFindingType.BYPASS, "BindToDeviceSocketFactory", AppRiskSignalStrength.HIGH),
+        RiskStringRule(AppRiskFindingType.BYPASS, "ResolverBinding", AppRiskSignalStrength.MEDIUM),
+        RiskStringRule(AppRiskFindingType.BYPASS, "TunProbeDiagnostics", AppRiskSignalStrength.MEDIUM),
         RiskStringRule(AppRiskFindingType.BYPASS, "SO_BINDTODEVICE", AppRiskSignalStrength.HIGH),
         RiskStringRule(AppRiskFindingType.BYPASS, "OsConstants.SO_BINDTODEVICE", AppRiskSignalStrength.HIGH),
         RiskStringRule(AppRiskFindingType.BYPASS, "setsockoptIfreq", AppRiskSignalStrength.HIGH),

@@ -59,6 +59,7 @@ class SettingsViewModel @Inject constructor(
             SettingsUiEvent.BackClicked -> emitEffect(SettingsUiEffect.NavigateBack)
             SettingsUiEvent.RefreshRequested -> refreshRoutingSummary()
             SettingsUiEvent.OpenSplitClicked -> emitEffect(SettingsUiEffect.NavigateToSplit)
+            SettingsUiEvent.OpenSemanticClicked -> emitEffect(SettingsUiEffect.NavigateToSemantic)
             SettingsUiEvent.SaveClicked -> save()
             SettingsUiEvent.ImportClicked -> emitEffect(SettingsUiEffect.OpenConfigPicker)
             SettingsUiEvent.ImportClipboardClicked -> emitEffect(SettingsUiEffect.ImportFromClipboard)

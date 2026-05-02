@@ -9,6 +9,7 @@ sealed interface SettingsUiEvent {
     data object BackClicked : SettingsUiEvent
     data object RefreshRequested : SettingsUiEvent
     data object OpenSplitClicked : SettingsUiEvent
+    data object OpenSemanticClicked : SettingsUiEvent
     data object SaveClicked : SettingsUiEvent
     data object ImportClicked : SettingsUiEvent
     data object ImportClipboardClicked : SettingsUiEvent
@@ -71,6 +72,7 @@ sealed interface SettingsUiEvent {
 sealed interface SettingsUiEffect {
     data object NavigateBack : SettingsUiEffect
     data object NavigateToSplit : SettingsUiEffect
+    data object NavigateToSemantic : SettingsUiEffect
     data object OpenConfigPicker : SettingsUiEffect
     data object ImportFromClipboard : SettingsUiEffect
 }
