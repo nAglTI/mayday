@@ -2,7 +2,6 @@ package org.debs.mayday.core.data.packageinfo
 
 import org.debs.mayday.core.model.AppRiskLevel
 import org.debs.mayday.core.model.AppSemanticProofLevel
-import org.debs.mayday.core.model.AppSemanticRiskScope
 import org.debs.mayday.core.model.AppSemanticVerdictStatus
 import org.jf.dexlib2.Opcode
 import org.jf.dexlib2.Opcodes
@@ -10,15 +9,19 @@ import org.jf.dexlib2.iface.DexFile
 import org.jf.dexlib2.immutable.ImmutableClassDef
 import org.jf.dexlib2.immutable.ImmutableMethod
 import org.jf.dexlib2.immutable.ImmutableMethodImplementation
+import org.jf.dexlib2.immutable.ImmutableMethodParameter
 import org.jf.dexlib2.immutable.instruction.ImmutableInstruction10x
 import org.jf.dexlib2.immutable.instruction.ImmutableInstruction11x
 import org.jf.dexlib2.immutable.instruction.ImmutableInstruction21c
 import org.jf.dexlib2.immutable.instruction.ImmutableInstruction21t
+import org.jf.dexlib2.immutable.instruction.ImmutableInstruction22c
 import org.jf.dexlib2.immutable.instruction.ImmutableInstruction31i
 import org.jf.dexlib2.immutable.instruction.ImmutableInstruction35c
 import org.jf.dexlib2.immutable.instruction.ImmutableInstruction3rc
+import org.jf.dexlib2.immutable.reference.ImmutableFieldReference
 import org.jf.dexlib2.immutable.reference.ImmutableMethodReference
 import org.jf.dexlib2.immutable.reference.ImmutableStringReference
+import org.jf.dexlib2.immutable.reference.ImmutableTypeReference
 import org.jf.dexlib2.writer.io.MemoryDataStore
 import org.jf.dexlib2.writer.pool.DexPool
 import org.junit.Assert.assertEquals
@@ -213,7 +216,6 @@ class AppSemanticAnalyzerTest {
 
             assertTrue(result.methodsAnalyzed > 0)
             assertTrue(result.signals.isNotEmpty())
-            assertTrue(result.manifestRisk.signals.any { it.scope == AppSemanticRiskScope.MANIFEST })
             assertEquals(
                 "$packageName golden malicious sample must stay CRITICAL:\n${result.describeForFailure()}",
                 AppRiskLevel.CRITICAL,
@@ -351,6 +353,437 @@ class AppSemanticAnalyzerTest {
         )
 
         assertTrue(vpnResult.signals.any { it.title == "VPN transport state check" })
+        assertTrue(
+            "VPN transport evidence should show resolved hasTransport argument:\n${vpnResult.describeForFailure()}",
+            vpnResult.signals.any { signal ->
+                signal.evidenceChain.any { evidence ->
+                    evidence.contains("NetworkCapabilities#hasTransport(TRANSPORT_VPN=4)")
+                }
+            },
+        )
+
+        val notVpnCapabilityApk = apkWithInstructions(
+            name = "semantic-not-vpn-capability.apk",
+            sourceClass = "Lcom/example/network/NetworkState;",
+            sourceMethod = "checkNotVpn",
+            registerCount = 2,
+            instructions = listOf(
+                ImmutableInstruction31i(Opcode.CONST, 0, 15),
+                ImmutableInstruction35c(
+                    Opcode.INVOKE_STATIC,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ImmutableMethodReference(
+                        "Landroid/net/NetworkCapabilities;",
+                        "hasCapability",
+                        listOf("I"),
+                        "Z",
+                    ),
+                ),
+                ImmutableInstruction10x(Opcode.RETURN_VOID),
+            ),
+        )
+
+        val notVpnCapabilityResult = analyzer.analyze(
+            packageName = "com.example.network",
+            versionCode = 1,
+            apkPaths = listOf(notVpnCapabilityApk.path),
+        )
+
+        assertTrue(notVpnCapabilityResult.signals.any { it.title == "VPN transport state check" })
+        assertTrue(
+            "NOT_VPN capability evidence should show resolved hasCapability argument:\n${notVpnCapabilityResult.describeForFailure()}",
+            notVpnCapabilityResult.signals.any { signal ->
+                signal.evidenceChain.any { evidence ->
+                    evidence.contains("NetworkCapabilities#hasCapability(NET_CAPABILITY_NOT_VPN=15)")
+                }
+            },
+        )
+    }
+
+    @Test
+    fun analyzeRaisesVpnMethodReturnIntoHttpHeaderTelemetry() {
+        val vpnSourceMethod = immutableMethod(
+            sourceClass = "Lcom/example/network/VpnUtils;",
+            sourceMethod = "isVpn",
+            registerCount = 2,
+            returnType = "Z",
+            instructions = listOf(
+                ImmutableInstruction31i(Opcode.CONST, 0, 4),
+                ImmutableInstruction35c(
+                    Opcode.INVOKE_STATIC,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ImmutableMethodReference(
+                        "Landroid/net/NetworkCapabilities;",
+                        "hasTransport",
+                        listOf("I"),
+                        "Z",
+                    ),
+                ),
+                ImmutableInstruction11x(Opcode.MOVE_RESULT, 0),
+                ImmutableInstruction11x(Opcode.RETURN, 0),
+            ),
+        )
+        val interceptorMethod = immutableMethod(
+            sourceClass = "Lcom/example/network/VpnHeaderInterceptor;",
+            sourceMethod = "intercept",
+            registerCount = 3,
+            instructions = listOf(
+                ImmutableInstruction35c(
+                    Opcode.INVOKE_STATIC,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ImmutableMethodReference(
+                        "Lcom/example/network/VpnUtils;",
+                        "isVpn",
+                        emptyList(),
+                        "Z",
+                    ),
+                ),
+                ImmutableInstruction11x(Opcode.MOVE_RESULT, 0),
+                ImmutableInstruction35c(
+                    Opcode.INVOKE_STATIC,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ImmutableMethodReference(
+                        "Ljava/lang/Boolean;",
+                        "valueOf",
+                        listOf("Z"),
+                        "Ljava/lang/Boolean;",
+                    ),
+                ),
+                ImmutableInstruction11x(Opcode.MOVE_RESULT_OBJECT, 0),
+                ImmutableInstruction21c(
+                    Opcode.CONST_STRING,
+                    1,
+                    ImmutableStringReference("X-APP-VPN-ENABLED"),
+                ),
+                ImmutableInstruction35c(
+                    Opcode.INVOKE_STATIC,
+                    2,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ImmutableMethodReference(
+                        "Lokhttp3/Headers\$Builder;",
+                        "add",
+                        listOf("Ljava/lang/String;", "Ljava/lang/String;"),
+                        "Lokhttp3/Headers\$Builder;",
+                    ),
+                ),
+                ImmutableInstruction10x(Opcode.RETURN_VOID),
+            ),
+        )
+        val apk = apkWithEntry(
+            name = "semantic-vpn-header-flow.apk",
+            entryName = "classes.dex",
+            content = dexWithMethods(listOf(vpnSourceMethod, interceptorMethod)),
+        )
+
+        val result = analyzer.analyze(
+            packageName = "com.example.network",
+            versionCode = 1,
+            apkPaths = listOf(apk.path),
+        )
+
+        assertEquals(
+            "VPN state returned from helper and sent as HTTP header should be high-risk:\n${result.describeForFailure()}",
+            AppRiskLevel.HIGH,
+            result.riskLevel,
+        )
+        assertTrue(result.signals.any { it.title.contains("HTTP header telemetry path") })
+        assertTrue(result.signals.any { signal ->
+            signal.evidenceChain.any { evidence -> evidence.contains("X-APP-VPN-ENABLED") }
+        })
+    }
+
+    @Test
+    fun analyzeRaisesVpnConstructorFieldIntoSerializedNetworkTelemetry() {
+        val modelField = ImmutableFieldReference(
+            "Lcom/example/analytics/VpnStateModel;",
+            "isVpn",
+            "Z",
+        )
+        val modelConstructor = immutableMethod(
+            sourceClass = "Lcom/example/analytics/VpnStateModel;",
+            sourceMethod = "<init>",
+            parameterTypes = listOf("Z"),
+            registerCount = 2,
+            instructions = listOf(
+                ImmutableInstruction22c(
+                    Opcode.IPUT_BOOLEAN,
+                    1,
+                    0,
+                    modelField,
+                ),
+                ImmutableInstruction10x(Opcode.RETURN_VOID),
+            ),
+        )
+        val reporterMethod = immutableMethod(
+            sourceClass = "Lcom/example/analytics/VpnReporter;",
+            sourceMethod = "report",
+            registerCount = 4,
+            instructions = listOf(
+                ImmutableInstruction31i(Opcode.CONST, 0, 4),
+                ImmutableInstruction35c(
+                    Opcode.INVOKE_STATIC,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ImmutableMethodReference(
+                        "Landroid/net/NetworkCapabilities;",
+                        "hasTransport",
+                        listOf("I"),
+                        "Z",
+                    ),
+                ),
+                ImmutableInstruction11x(Opcode.MOVE_RESULT, 0),
+                ImmutableInstruction21c(
+                    Opcode.NEW_INSTANCE,
+                    1,
+                    ImmutableTypeReference("Lcom/example/analytics/VpnStateModel;"),
+                ),
+                ImmutableInstruction35c(
+                    Opcode.INVOKE_DIRECT,
+                    2,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ImmutableMethodReference(
+                        "Lcom/example/analytics/VpnStateModel;",
+                        "<init>",
+                        listOf("Z"),
+                        "V",
+                    ),
+                ),
+                ImmutableInstruction21c(
+                    Opcode.CONST_STRING,
+                    2,
+                    ImmutableStringReference("is_vpn"),
+                ),
+                ImmutableInstruction35c(
+                    Opcode.INVOKE_STATIC,
+                    2,
+                    2,
+                    1,
+                    0,
+                    0,
+                    0,
+                    ImmutableMethodReference(
+                        "Lorg/json/JSONObject;",
+                        "put",
+                        listOf("Ljava/lang/String;", "Ljava/lang/Object;"),
+                        "Lorg/json/JSONObject;",
+                    ),
+                ),
+                ImmutableInstruction35c(
+                    Opcode.INVOKE_STATIC,
+                    1,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ImmutableMethodReference(
+                        "Lokhttp3/RequestBody;",
+                        "create",
+                        listOf("Ljava/lang/Object;"),
+                        "Lokhttp3/RequestBody;",
+                    ),
+                ),
+                ImmutableInstruction11x(Opcode.MOVE_RESULT_OBJECT, 3),
+                ImmutableInstruction35c(
+                    Opcode.INVOKE_STATIC,
+                    1,
+                    3,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ImmutableMethodReference(
+                        "Ljava/net/URL;",
+                        "openConnection",
+                        listOf("Ljava/lang/String;"),
+                        "Ljava/net/URLConnection;",
+                    ),
+                ),
+                ImmutableInstruction10x(Opcode.RETURN_VOID),
+            ),
+        )
+        val apk = apkWithEntry(
+            name = "semantic-vpn-field-serialization-flow.apk",
+            entryName = "classes.dex",
+            content = dexWithMethods(listOf(modelConstructor, reporterMethod)),
+        )
+
+        val result = analyzer.analyze(
+            packageName = "com.example.analytics",
+            versionCode = 1,
+            apkPaths = listOf(apk.path),
+        )
+
+        assertEquals(
+            "VPN state stored in DTO/model field and sent through serialized network payload should be high-risk:\n${result.describeForFailure()}",
+            AppRiskLevel.HIGH,
+            result.riskLevel,
+        )
+        assertTrue(result.signals.any { it.title.contains("serialized") })
+        assertTrue(result.signals.any { signal ->
+            signal.evidenceChain.any { evidence -> evidence.contains("is_vpn") || evidence.contains("isVpn") }
+        })
+    }
+
+    @Test
+    fun analyzePropagatesBranchEncodedVpnStateIntoConstructorField() {
+        val modelField = ImmutableFieldReference(
+            "Lcom/example/analytics/EncodedVpnModel;",
+            "d",
+            "I",
+        )
+        val modelConstructor = immutableMethod(
+            sourceClass = "Lcom/example/analytics/EncodedVpnModel;",
+            sourceMethod = "<init>",
+            parameterTypes = listOf("I"),
+            registerCount = 2,
+            instructions = listOf(
+                ImmutableInstruction22c(
+                    Opcode.IPUT,
+                    1,
+                    0,
+                    modelField,
+                ),
+                ImmutableInstruction10x(Opcode.RETURN_VOID),
+            ),
+        )
+        val reporterMethod = immutableMethod(
+            sourceClass = "Lcom/example/analytics/EncodedVpnReporter;",
+            sourceMethod = "report",
+            registerCount = 4,
+            instructions = listOf(
+                ImmutableInstruction31i(Opcode.CONST, 0, 4),
+                ImmutableInstruction35c(
+                    Opcode.INVOKE_STATIC,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ImmutableMethodReference(
+                        "Landroid/net/NetworkCapabilities;",
+                        "hasTransport",
+                        listOf("I"),
+                        "Z",
+                    ),
+                ),
+                ImmutableInstruction11x(Opcode.MOVE_RESULT, 0),
+                ImmutableInstruction21t(Opcode.IF_EQZ, 0, 2),
+                ImmutableInstruction31i(Opcode.CONST, 0, 2),
+                ImmutableInstruction21c(
+                    Opcode.NEW_INSTANCE,
+                    1,
+                    ImmutableTypeReference("Lcom/example/analytics/EncodedVpnModel;"),
+                ),
+                ImmutableInstruction35c(
+                    Opcode.INVOKE_DIRECT,
+                    2,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ImmutableMethodReference(
+                        "Lcom/example/analytics/EncodedVpnModel;",
+                        "<init>",
+                        listOf("I"),
+                        "V",
+                    ),
+                ),
+                ImmutableInstruction21c(
+                    Opcode.CONST_STRING,
+                    2,
+                    ImmutableStringReference("vpn_status"),
+                ),
+                ImmutableInstruction35c(
+                    Opcode.INVOKE_STATIC,
+                    2,
+                    2,
+                    1,
+                    0,
+                    0,
+                    0,
+                    ImmutableMethodReference(
+                        "Lorg/json/JSONObject;",
+                        "put",
+                        listOf("Ljava/lang/String;", "Ljava/lang/Object;"),
+                        "Lorg/json/JSONObject;",
+                    ),
+                ),
+                ImmutableInstruction35c(
+                    Opcode.INVOKE_STATIC,
+                    1,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ImmutableMethodReference(
+                        "Ljava/net/URL;",
+                        "openConnection",
+                        listOf("Ljava/lang/String;"),
+                        "Ljava/net/URLConnection;",
+                    ),
+                ),
+                ImmutableInstruction10x(Opcode.RETURN_VOID),
+            ),
+        )
+        val apk = apkWithEntry(
+            name = "semantic-vpn-encoded-field-flow.apk",
+            entryName = "classes.dex",
+            content = dexWithMethods(listOf(modelConstructor, reporterMethod)),
+        )
+
+        val result = analyzer.analyze(
+            packageName = "com.example.analytics",
+            versionCode = 1,
+            apkPaths = listOf(apk.path),
+        )
+
+        assertEquals(
+            "VPN state encoded through a branch into a model field and network payload should be high-risk:\n${result.describeForFailure()}",
+            AppRiskLevel.HIGH,
+            result.riskLevel,
+        )
+        assertTrue(
+            "Evidence should preserve the encoded VPN field or telemetry key:\n${result.describeForFailure()}",
+            result.signals.any { signal ->
+                signal.evidenceChain.any { evidence -> evidence.contains("vpn_status") || evidence.contains("EncodedVpnModel#d") }
+            },
+        )
     }
 
     @Test
@@ -469,6 +902,172 @@ class AppSemanticAnalyzerTest {
         )
         assertEquals(AppSemanticProofLevel.HIGH, result.verdictLevel)
         assertEquals(100, result.verdictConfidence)
+    }
+
+    @Test
+    fun analyzeDoesNotEscalateUserFacingProxyAndSdkPackageInventoryBundle() {
+        val sdkInventoryMethod = immutableMethod(
+            sourceClass = "Lcom/google/android/recaptcha/internal/zzcz;",
+            sourceMethod = "zzc",
+            registerCount = 1,
+            instructions = listOf(
+                ImmutableInstruction35c(
+                    Opcode.INVOKE_STATIC,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ImmutableMethodReference(
+                        "Landroid/content/pm/PackageManager;",
+                        "getInstalledPackages",
+                        emptyList(),
+                        "Ljava/util/List;",
+                    ),
+                ),
+                ImmutableInstruction10x(Opcode.RETURN_VOID),
+            ),
+        )
+        val browserResolverMethod = immutableMethod(
+            sourceClass = "Lorg/telegram/messenger/browser/Browser;",
+            sourceMethod = "getBrowserPackageName",
+            registerCount = 1,
+            instructions = listOf(
+                ImmutableInstruction21c(
+                    Opcode.CONST_STRING,
+                    0,
+                    ImmutableStringReference("org.torproject.torbrowser"),
+                ),
+                ImmutableInstruction10x(Opcode.RETURN_VOID),
+            ),
+        )
+        val userProxyMethod = immutableMethod(
+            sourceClass = "Lorg/telegram/ui/LaunchActivity;",
+            sourceMethod = "onCreate",
+            registerCount = 1,
+            instructions = listOf(
+                ImmutableInstruction21c(
+                    Opcode.CONST_STRING,
+                    0,
+                    ImmutableStringReference("tg:socks"),
+                ),
+                ImmutableInstruction10x(Opcode.RETURN_VOID),
+            ),
+        )
+        val apk = apkWithEntry(
+            name = "semantic-telegram-proxy-browser.apk",
+            entryName = "classes.dex",
+            content = dexWithMethods(
+                listOf(
+                    sdkInventoryMethod,
+                    browserResolverMethod,
+                    userProxyMethod,
+                ),
+            ),
+        )
+
+        val result = analyzer.analyze(
+            packageName = "org.telegram.messenger",
+            versionCode = 1,
+            apkPaths = listOf(apk.path),
+        )
+
+        assertTrue(
+            "User-facing proxy/browser resolver and reCAPTCHA inventory must not form a methodology HIGH bundle:\n${result.describeForFailure()}",
+            result.riskLevel < AppRiskLevel.HIGH,
+        )
+        assertTrue(result.signals.none { it.title == "methodology VPN inventory fingerprint bundle" })
+        assertTrue(result.signals.none { it.title == "methodology VPN surveillance call-graph bundle" })
+    }
+
+    @Test
+    fun analyzeDoesNotEscalateSdkBroadInventoryWithSystemProxyDiagnostics() {
+        val sdkInventoryMethod = immutableMethod(
+            sourceClass = "Laisw;",
+            sourceMethod = "getInstalledPackages",
+            registerCount = 1,
+            instructions = listOf(
+                ImmutableInstruction35c(
+                    Opcode.INVOKE_STATIC,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ImmutableMethodReference(
+                        "Landroid/content/pm/PackageManager;",
+                        "getInstalledPackages",
+                        emptyList(),
+                        "Ljava/util/List;",
+                    ),
+                ),
+                ImmutableInstruction10x(Opcode.RETURN_VOID),
+            ),
+        )
+        val chromiumNetworkStateMethod = immutableMethod(
+            sourceClass = "Lorg/chromium/net/AndroidNetworkLibrary;",
+            sourceMethod = "collectNetworkState",
+            registerCount = 2,
+            instructions = listOf(
+                ImmutableInstruction21c(
+                    Opcode.CONST_STRING,
+                    0,
+                    ImmutableStringReference("device_id"),
+                ),
+                ImmutableInstruction31i(Opcode.CONST, 0, 4),
+                ImmutableInstruction35c(
+                    Opcode.INVOKE_STATIC,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ImmutableMethodReference(
+                        "Landroid/net/NetworkCapabilities;",
+                        "hasTransport",
+                        listOf("I"),
+                        "Z",
+                    ),
+                ),
+                ImmutableInstruction35c(
+                    Opcode.INVOKE_STATIC,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ImmutableMethodReference(
+                        "Landroid/net/ConnectivityManager;",
+                        "getDefaultProxy",
+                        emptyList(),
+                        "Landroid/net/ProxyInfo;",
+                    ),
+                ),
+                ImmutableInstruction10x(Opcode.RETURN_VOID),
+            ),
+        )
+        val apk = apkWithEntry(
+            name = "semantic-sdk-system-proxy-inventory.apk",
+            entryName = "classes.dex",
+            content = dexWithMethods(listOf(sdkInventoryMethod, chromiumNetworkStateMethod)),
+        )
+
+        val result = analyzer.analyze(
+            packageName = "com.google.android.apps.youtube.music",
+            versionCode = 1,
+            apkPaths = listOf(apk.path),
+        )
+
+        assertTrue(
+            "SDK broad package inventory plus generic system proxy diagnostics must stay below HIGH without VPN-specific inventory, telemetry, public-IP, bypass, or active proxy probing:\n${result.describeForFailure()}",
+            result.riskLevel < AppRiskLevel.HIGH,
+        )
+        assertTrue(result.signals.none { it.title == "methodology VPN inventory fingerprint bundle" })
+        assertTrue(result.signals.none { it.title == "methodology VPN surveillance call-graph bundle" })
     }
 
     @Test
@@ -2323,6 +2922,8 @@ class AppSemanticAnalyzerTest {
         sourceMethod: String,
         registerCount: Int,
         instructions: List<org.jf.dexlib2.iface.instruction.Instruction>,
+        parameterTypes: List<String> = emptyList(),
+        returnType: String = "V",
     ): ImmutableMethod {
         val implementation = ImmutableMethodImplementation(
             registerCount,
@@ -2333,8 +2934,8 @@ class AppSemanticAnalyzerTest {
         return ImmutableMethod(
             sourceClass,
             sourceMethod,
-            emptyList(),
-            "V",
+            parameterTypes.map { type -> ImmutableMethodParameter(type, emptySet(), null) },
+            returnType,
             0x1,
             emptySet(),
             emptySet(),

@@ -127,6 +127,9 @@ class AppSemanticCacheStore @Inject constructor(
             .put("risk_level", riskLevel.name)
             .put("proof_confidence", proofConfidence)
             .put("proof_level", proofLevel.name)
+            .put("clean_score", cleanScore)
+            .put("clean_proof_confidence", cleanProofConfidence)
+            .put("clean_proof_level", cleanProofLevel.name)
             .put("verdict_confidence", verdictConfidence)
             .put("verdict_level", verdictLevel.name)
             .put("verdict_status", verdictStatus.name)
@@ -199,6 +202,12 @@ class AppSemanticCacheStore @Inject constructor(
                 "proof_level",
                 AppSemanticProofLevel.from(optInt("proof_confidence", 0)),
             ),
+            cleanScore = optInt("clean_score", optInt("clean_proof_confidence", 0)),
+            cleanProofConfidence = optInt("clean_proof_confidence", optInt("clean_score", 0)),
+            cleanProofLevel = optEnum(
+                "clean_proof_level",
+                AppSemanticProofLevel.from(optInt("clean_proof_confidence", optInt("clean_score", 0))),
+            ),
             verdictConfidence = optInt("verdict_confidence", fallbackVerdictConfidence()),
             verdictLevel = optEnum(
                 "verdict_level",
@@ -213,6 +222,7 @@ class AppSemanticCacheStore @Inject constructor(
             score = optInt("score", 0),
             riskLevel = optEnum("risk_level", AppRiskLevel.CLEAN),
             threatProofConfidence = optInt("proof_confidence", 0),
+            cleanProofConfidence = optInt("clean_proof_confidence", optInt("clean_score", 0)),
         )
     }
 
@@ -221,6 +231,7 @@ class AppSemanticCacheStore @Inject constructor(
             score = optInt("score", 0),
             riskLevel = optEnum("risk_level", AppRiskLevel.CLEAN),
             threatProofConfidence = optInt("proof_confidence", 0),
+            cleanProofConfidence = optInt("clean_proof_confidence", optInt("clean_score", 0)),
         )
     }
 

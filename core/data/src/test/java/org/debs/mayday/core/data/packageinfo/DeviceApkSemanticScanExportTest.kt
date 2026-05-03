@@ -154,7 +154,7 @@ class DeviceApkSemanticScanExportTest {
             packageDirs = packageDirs,
         )
 
-        fun addSingleApkDirectory(
+        fun addCategoryDirectory(
             id: String,
             label: String,
             dir: File,
@@ -163,7 +163,10 @@ class DeviceApkSemanticScanExportTest {
             val apks = dir.listFiles { file -> file.isFile && file.extension.equals("apk", ignoreCase = true) }
                 .orEmpty()
                 .sortedBy(File::getName)
-            val scanDevice = device(id, label, dir, apks)
+            val packageDirs = dir.listFiles(File::isDirectory)
+                .orEmpty()
+                .sortedBy(File::getName)
+            val scanDevice = device(id, label, dir, apks + packageDirs)
             apks.forEach { apk ->
                 inputs += PackageScanInput(
                     device = scanDevice,
@@ -172,19 +175,6 @@ class DeviceApkSemanticScanExportTest {
                     apkFiles = listOf(apk),
                 )
             }
-        }
-
-        addSingleApkDirectory("black", "black", File(inputRoot, "black"))
-        addSingleApkDirectory("white", "white", File(inputRoot, "white"))
-        addSingleApkDirectory("gray_high", "gray/high", File(inputRoot, "gray/high"))
-        addSingleApkDirectory("gray_low", "gray/low", File(inputRoot, "gray/low"))
-
-        val splitRoot = File(inputRoot, "apks/apks")
-        if (splitRoot.isDirectory) {
-            val packageDirs = splitRoot.listFiles(File::isDirectory)
-                .orEmpty()
-                .sortedBy(File::getName)
-            val scanDevice = device("apks", "apks", splitRoot, packageDirs)
             packageDirs.forEach { packageDir ->
                 val apkFiles = packageDir.walkTopDown()
                     .filter { it.isFile && it.extension.equals("apk", ignoreCase = true) }
@@ -199,6 +189,86 @@ class DeviceApkSemanticScanExportTest {
                     )
                 }
             }
+        }
+
+        fun addSplitPackageRoot(
+            id: String,
+            label: String,
+            root: File,
+        ) {
+            if (!root.isDirectory) return
+            val packageDirs = root.listFiles(File::isDirectory)
+                .orEmpty()
+                .sortedBy(File::getName)
+            val scanDevice = device(id, label, root, packageDirs)
+            packageDirs.forEach { packageDir ->
+                val apkFiles = packageDir.walkTopDown()
+                    .filter { it.isFile && it.extension.equals("apk", ignoreCase = true) }
+                    .sortedBy { it.name }
+                    .toList()
+                if (apkFiles.isNotEmpty()) {
+                    inputs += PackageScanInput(
+                        device = scanDevice,
+                        packageName = packageDir.name,
+                        packageDir = packageDir,
+                        apkFiles = apkFiles,
+                    )
+                }
+            }
+        }
+
+        addCategoryDirectory("black", "black", File(inputRoot, "black"))
+        addCategoryDirectory("grey", "grey", File(inputRoot, "grey"))
+        addCategoryDirectory("white", "white", File(inputRoot, "white"))
+        addCategoryDirectory("unknown", "unknown", File(inputRoot, "unknown"))
+        addCategoryDirectory("gray", "gray", File(inputRoot, "gray"))
+        addCategoryDirectory("gray_high", "gray/high", File(inputRoot, "gray/high"))
+        addCategoryDirectory("gray_low", "gray/low", File(inputRoot, "gray/low"))
+        addCategoryDirectory("critical", "critical", File(inputRoot, "critical"))
+        addCategoryDirectory("research", "research", File(inputRoot, "research"))
+        addCategoryDirectory("false_positive", "false-positive", File(inputRoot, "false-positive"))
+        addCategoryDirectory("false_positive", "false_positive", File(inputRoot, "false_positive"))
+        addCategoryDirectory("false_negative", "false-negative", File(inputRoot, "false-negative"))
+        addCategoryDirectory("false_negative", "false_negative", File(inputRoot, "false_negative"))
+
+        val splitRoot = File(inputRoot, "apks/apks")
+        if (splitRoot.isDirectory) {
+            addSplitPackageRoot("apks", "apks", splitRoot)
+        }
+
+        val categoryRoots = setOf(
+            "black",
+            "grey",
+            "white",
+            "unknown",
+            "gray",
+            "critical",
+            "research",
+            "false-positive",
+            "false_positive",
+            "false-negative",
+            "false_negative",
+        )
+        inputRoot.listFiles(File::isDirectory)
+            .orEmpty()
+            .filterNot { dir -> dir.name in categoryRoots }
+            .forEach { deviceDir ->
+                addSplitPackageRoot(
+                    id = deviceDir.name,
+                    label = deviceDir.name,
+                    root = File(deviceDir, "apks"),
+                )
+            }
+
+        val rootPackageDirs = inputRoot.listFiles(File::isDirectory)
+            .orEmpty()
+            .filter { dir ->
+                dir.name !in categoryRoots &&
+                    !File(dir, "apks").isDirectory &&
+                    dir.walkTopDown().any { file -> file.isFile && file.extension.equals("apk", ignoreCase = true) }
+            }
+        if (rootPackageDirs.isNotEmpty()) {
+            addSplitPackageRoot("root", "root", inputRoot)
         }
 
         return inputs.sortedWith(
@@ -270,6 +340,9 @@ class DeviceApkSemanticScanExportTest {
                 append("  \"risk_level\": ${analysis.riskLevel.name.json()},\n")
                 append("  \"proof_confidence\": ${analysis.proofConfidence},\n")
                 append("  \"proof_level\": ${analysis.proofLevel.name.json()},\n")
+                append("  \"clean_score\": ${analysis.cleanScore},\n")
+                append("  \"clean_proof_confidence\": ${analysis.cleanProofConfidence},\n")
+                append("  \"clean_proof_level\": ${analysis.cleanProofLevel.name.json()},\n")
                 append("  \"verdict_confidence\": ${analysis.verdictConfidence},\n")
                 append("  \"verdict_level\": ${analysis.verdictLevel.name.json()},\n")
                 append("  \"verdict_status\": ${analysis.verdictStatus.name.json()},\n")
@@ -356,6 +429,9 @@ class DeviceApkSemanticScanExportTest {
                 "score",
                 "proof_level",
                 "proof_confidence",
+                "clean_score",
+                "clean_proof_level",
+                "clean_proof_confidence",
                 "verdict_status",
                 "verdict_level",
                 "verdict_confidence",
@@ -384,6 +460,9 @@ class DeviceApkSemanticScanExportTest {
                     json.numberValue("score"),
                     json.stringValue("proof_level").orEmpty(),
                     json.numberValue("proof_confidence"),
+                    json.numberValue("clean_score"),
+                    json.stringValue("clean_proof_level").orEmpty(),
+                    json.numberValue("clean_proof_confidence"),
                     json.stringValue("verdict_status").orEmpty(),
                     json.stringValue("verdict_level").orEmpty(),
                     json.numberValue("verdict_confidence"),

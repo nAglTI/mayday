@@ -42,6 +42,7 @@ enum class AppSemanticProofLevel {
 }
 
 enum class AppSemanticVerdictStatus {
+    UNKNOWN,
     PROVEN_CLEAN,
     PROVEN_LOW_RISK,
     UNPROVEN_THREAT,
@@ -55,11 +56,13 @@ object AppSemanticVerdictConfidence {
         score: Int,
         riskLevel: AppRiskLevel,
         threatProofConfidence: Int,
+        cleanProofConfidence: Int,
     ): Int {
         return confidenceFor(
-            status = statusFor(score, riskLevel, threatProofConfidence),
+            status = statusFor(score, riskLevel, threatProofConfidence, cleanProofConfidence),
             score = score.coerceIn(0, 100),
             threatProofConfidence = threatProofConfidence.coerceIn(0, 100),
+            cleanProofConfidence = cleanProofConfidence.coerceIn(0, 100),
         )
     }
 
@@ -67,16 +70,21 @@ object AppSemanticVerdictConfidence {
         score: Int,
         riskLevel: AppRiskLevel,
         threatProofConfidence: Int,
+        cleanProofConfidence: Int,
     ): AppSemanticVerdictStatus {
         val scoreBand = scoreBandFor(score)
         val proofBand = AppSemanticProofLevel.from(threatProofConfidence)
+        val cleanBand = AppSemanticProofLevel.from(cleanProofConfidence)
+        if (proofBand == AppSemanticProofLevel.LOW && cleanBand == AppSemanticProofLevel.LOW) {
+            return AppSemanticVerdictStatus.UNKNOWN
+        }
         return when (scoreBand) {
-            AppRiskLevel.CLEAN -> if (threatProofConfidence == 0) {
+            AppRiskLevel.CLEAN -> if (threatProofConfidence == 0 && cleanBand != AppSemanticProofLevel.LOW) {
                 AppSemanticVerdictStatus.PROVEN_CLEAN
             } else {
                 AppSemanticVerdictStatus.INCONSISTENT
             }
-            AppRiskLevel.LOW -> if (proofBand == AppSemanticProofLevel.LOW) {
+            AppRiskLevel.LOW -> if (proofBand == AppSemanticProofLevel.LOW && cleanBand != AppSemanticProofLevel.LOW) {
                 AppSemanticVerdictStatus.PROVEN_LOW_RISK
             } else {
                 AppSemanticVerdictStatus.INCONSISTENT
@@ -110,10 +118,12 @@ object AppSemanticVerdictConfidence {
         status: AppSemanticVerdictStatus,
         score: Int,
         threatProofConfidence: Int,
+        cleanProofConfidence: Int,
     ): Int {
         return when (status) {
-            AppSemanticVerdictStatus.PROVEN_CLEAN -> 100
-            AppSemanticVerdictStatus.PROVEN_LOW_RISK -> (100 - score).coerceIn(0, 100)
+            AppSemanticVerdictStatus.UNKNOWN -> maxOf(threatProofConfidence, cleanProofConfidence).coerceAtMost(49)
+            AppSemanticVerdictStatus.PROVEN_CLEAN -> cleanProofConfidence.coerceIn(0, 100)
+            AppSemanticVerdictStatus.PROVEN_LOW_RISK -> minOf(cleanProofConfidence, 100 - score).coerceIn(0, 100)
             AppSemanticVerdictStatus.UNPROVEN_THREAT -> maxOf(score, 100 - threatProofConfidence).coerceIn(0, 100)
             AppSemanticVerdictStatus.PARTIAL_THREAT,
             AppSemanticVerdictStatus.PROVEN_THREAT,
@@ -161,16 +171,21 @@ data class AppSemanticAnalysisResult(
     val scannedAtEpochMillis: Long = 0L,
     val proofConfidence: Int = signals.maxOfOrNull(AppSemanticSignal::proofConfidence) ?: 0,
     val proofLevel: AppSemanticProofLevel = AppSemanticProofLevel.from(proofConfidence),
+    val cleanScore: Int = 0,
+    val cleanProofConfidence: Int = cleanScore,
+    val cleanProofLevel: AppSemanticProofLevel = AppSemanticProofLevel.from(cleanProofConfidence),
     val verdictConfidence: Int = AppSemanticVerdictConfidence.from(
         score = score,
         riskLevel = riskLevel,
         threatProofConfidence = proofConfidence,
+        cleanProofConfidence = cleanProofConfidence,
     ),
     val verdictLevel: AppSemanticProofLevel = AppSemanticProofLevel.from(verdictConfidence),
     val verdictStatus: AppSemanticVerdictStatus = AppSemanticVerdictConfidence.statusFor(
         score = score,
         riskLevel = riskLevel,
         threatProofConfidence = proofConfidence,
+        cleanProofConfidence = cleanProofConfidence,
     ),
 ) {
     val hasWarnings: Boolean

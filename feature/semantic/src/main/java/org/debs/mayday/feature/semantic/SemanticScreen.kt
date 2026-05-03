@@ -567,6 +567,14 @@ private fun SemanticDetailsSheet(
                 MaydayStatRow(label = "CFG", value = "${item.analysis.cfgNodeCount} / ${item.analysis.cfgEdgeCount}")
                 MaydayStatRow(label = "DFG", value = item.analysis.dfgEdgeCount.toString())
                 MaydayStatRow(label = text.methods, value = item.analysis.methodsAnalyzed.toString())
+                MaydayStatRow(
+                    label = text.proof,
+                    value = "${text.proofLevel(item.analysis.proofLevel)} / ${item.analysis.proofConfidence}",
+                )
+                MaydayStatRow(
+                    label = text.cleanProof,
+                    value = "${text.proofLevel(item.analysis.cleanProofLevel)} / ${item.analysis.cleanProofConfidence}",
+                )
             }
             item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
             item { MaydaySectionTitle(text = text.signals) }
@@ -744,6 +752,7 @@ private data class SemanticText(
     val riskBlocks: String,
     val risk: String,
     val proof: String,
+    val cleanProof: String,
     val verdictConfidence: String,
     val appCode: String,
     val sdkCode: String,
@@ -810,6 +819,7 @@ private fun semanticText(language: AppLanguage): SemanticText {
             riskBlocks = "блоки риска",
             risk = "риск",
             proof = "доказанность",
+            cleanProof = "доказанность чистоты",
             verdictConfidence = "вердикт",
             appCode = "код приложения",
             sdkCode = "код SDK",
@@ -848,6 +858,7 @@ private fun semanticText(language: AppLanguage): SemanticText {
             verdictHint = { result ->
                 val matrix = "Итог берётся из матрицы score × доказанность угрозы."
                 when (result.verdictStatus) {
+                    AppSemanticVerdictStatus.UNKNOWN -> "$matrix Доказанность угрозы и доказанность чистоты низкие: результат неизвестен и требует ручного разбора."
                     AppSemanticVerdictStatus.PROVEN_CLEAN -> "$matrix Сигналов угрозы нет: чистота доказана."
                     AppSemanticVerdictStatus.PROVEN_LOW_RISK -> "$matrix Есть только слабые диагностические следы: доказан низкий риск."
                     AppSemanticVerdictStatus.UNPROVEN_THREAT -> "$matrix Score показывает подозрение, но угроза не доказана."
@@ -858,6 +869,7 @@ private fun semanticText(language: AppLanguage): SemanticText {
             },
             verdictStatus = { status ->
                 when (status) {
+                    AppSemanticVerdictStatus.UNKNOWN -> "неизвестно"
                     AppSemanticVerdictStatus.PROVEN_CLEAN -> "доказана чистота"
                     AppSemanticVerdictStatus.PROVEN_LOW_RISK -> "доказан низкий риск"
                     AppSemanticVerdictStatus.UNPROVEN_THREAT -> "угроза не доказана"
@@ -926,6 +938,7 @@ private fun semanticText(language: AppLanguage): SemanticText {
             riskBlocks = "risk blocks",
             risk = "risk",
             proof = "proof",
+            cleanProof = "clean proof",
             verdictConfidence = "verdict",
             appCode = "application code",
             sdkCode = "SDK code",
@@ -964,6 +977,7 @@ private fun semanticText(language: AppLanguage): SemanticText {
             verdictHint = { result ->
                 val matrix = "The result comes from a score × threat-proof matrix."
                 when (result.verdictStatus) {
+                    AppSemanticVerdictStatus.UNKNOWN -> "$matrix Threat proof and clean proof are both low: result is unknown and needs manual inspection."
                     AppSemanticVerdictStatus.PROVEN_CLEAN -> "$matrix No threat signal was found: clean verdict is proven."
                     AppSemanticVerdictStatus.PROVEN_LOW_RISK -> "$matrix Only weak diagnostics were found: low risk is proven."
                     AppSemanticVerdictStatus.UNPROVEN_THREAT -> "$matrix Score is suspicious, but the threat is not proven."
@@ -974,6 +988,7 @@ private fun semanticText(language: AppLanguage): SemanticText {
             },
             verdictStatus = { status ->
                 when (status) {
+                    AppSemanticVerdictStatus.UNKNOWN -> "unknown"
                     AppSemanticVerdictStatus.PROVEN_CLEAN -> "clean proven"
                     AppSemanticVerdictStatus.PROVEN_LOW_RISK -> "low risk proven"
                     AppSemanticVerdictStatus.UNPROVEN_THREAT -> "threat unproven"
