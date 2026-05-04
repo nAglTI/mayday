@@ -1,4 +1,4 @@
-package org.debs.mayday.core.data.packageinfo
+﻿package org.debs.mayday.core.data.packageinfo
 
 import net.dongliu.apk.parser.ApkFile
 import org.debs.mayday.core.model.AppRiskLevel
@@ -10,6 +10,7 @@ import org.debs.mayday.core.model.AppSemanticRiskScope
 import org.debs.mayday.core.model.AppSemanticSignal
 import org.debs.mayday.core.model.AppSemanticSignalType
 import org.debs.mayday.core.model.AppSemanticVerdictConfidence
+import org.jf.dexlib2.Opcode
 import org.jf.dexlib2.Opcodes
 import org.jf.dexlib2.dexbacked.DexBackedDexFile
 import org.jf.dexlib2.iface.ClassDef
@@ -31,6 +32,8 @@ import org.jf.dexlib2.iface.reference.StringReference
 import org.jf.dexlib2.iface.reference.TypeReference
 import java.io.File
 import java.io.InputStream
+import java.util.EnumMap
+import java.util.concurrent.TimeUnit
 import java.util.zip.ZipFile
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -44,35 +47,48 @@ class AppSemanticAnalyzer @Inject constructor() {
         versionCode: Long?,
         apkPaths: List<String>,
         cancellationCheck: () -> Unit = {},
+        performanceTrace: AppSemanticAnalyzerPerformanceTrace? = null,
     ): AppSemanticAnalysisResult {
         val summary = MutableSemanticSummary(packageName = packageName)
-        apkPaths
-            .asSequence()
-            .filter(String::isNotBlank)
-            .distinct()
-            .forEach { path ->
-                cancellationCheck()
-                scanApk(
-                    path = path,
-                    summary = summary,
-                    cancellationCheck = cancellationCheck,
-                )
-            }
+        performanceTrace.measureOrRun("scan_apks_total") {
+            apkPaths
+                .asSequence()
+                .filter(String::isNotBlank)
+                .distinct()
+                .forEach { path ->
+                    cancellationCheck()
+                    scanApk(
+                        path = path,
+                        summary = summary,
+                        cancellationCheck = cancellationCheck,
+                        performanceTrace = performanceTrace,
+                    )
+                }
+        }
 
         val trustedVpnClient = packageName in AppRiskRules.vpnClientPackageNames &&
             summary.facts.any { it.kind == SemanticFactKind.MANIFEST_VPN_SERVICE_QUERY }
-        val signals = buildSignals(summary, trustedVpnClient)
-            .distinctBy { signal ->
-                "${signal.scope}:${signal.source}:${signal.type}:${signal.title}:${signal.evidenceChain.joinToString("|")}"
-            }
-            .sortedWith(
-                compareByDescending<AppSemanticSignal> { it.proofConfidence }
-                    .thenByDescending { it.confidence }
-                    .thenBy { it.scope.name }
-                    .thenBy { it.type.name }
-                    .thenBy { it.title },
-            )
-            .take(MAX_SIGNALS)
+        val signals = performanceTrace.measureOrRun("signal_building") {
+            val builtSignals = buildSignals(summary, trustedVpnClient, performanceTrace)
+            performanceTrace?.count("signals_built_before_dedupe", builtSignals.size.toLong())
+            val distinctSignals = builtSignals
+                .distinctBy { signal ->
+                    "${signal.scope}:${signal.source}:${signal.type}:${signal.title}:${signal.evidenceChain.joinToString("|")}"
+                }
+            performanceTrace?.count("signals_after_dedupe", distinctSignals.size.toLong())
+            distinctSignals
+                .sortedWith(
+                    compareByDescending<AppSemanticSignal> { it.proofConfidence }
+                        .thenByDescending { it.confidence }
+                        .thenBy { it.scope.name }
+                        .thenBy { it.type.name }
+                        .thenBy { it.title },
+                )
+                .take(MAX_SIGNALS)
+                .also { limitedSignals ->
+                    performanceTrace?.count("signals_after_limit", limitedSignals.size.toLong())
+                }
+        }
 
         val appBucket = bucketFor(signals, AppSemanticRiskScope.APP_CODE)
         val sdkBucket = bucketFor(signals, AppSemanticRiskScope.SDK_CODE)
@@ -135,36 +151,43 @@ class AppSemanticAnalyzer @Inject constructor() {
         path: String,
         summary: MutableSemanticSummary,
         cancellationCheck: () -> Unit,
+        performanceTrace: AppSemanticAnalyzerPerformanceTrace?,
     ) {
         cancellationCheck()
         val apkFile = File(path)
         if (!apkFile.isFile || !apkFile.canRead()) return
 
-        scanManifest(apkFile, summary)
+        performanceTrace.measureOrRun("manifest_parse") {
+            scanManifest(apkFile, summary)
+        }
         try {
-            ZipFile(apkFile).use { zipFile ->
-                val entries = zipFile.entries()
-                while (entries.hasMoreElements()) {
-                    cancellationCheck()
-                    val entry = entries.nextElement()
-                    if (entry.isDirectory) continue
-                    val evidence = "${apkFile.name}!/${entry.name}"
-                    when {
-                        entry.name.matches(DEX_ENTRY_PATTERN) -> zipFile.getInputStream(entry).use { input ->
-                            scanDexEntry(
-                                input = input,
-                                evidencePrefix = evidence,
-                                summary = summary,
-                                cancellationCheck = cancellationCheck,
-                            )
-                        }
-                        entry.name.endsWith(".so") -> zipFile.getInputStream(entry).use { input ->
-                            scanNativeEntry(
-                                input = input,
-                                evidencePrefix = evidence,
-                                summary = summary,
-                                cancellationCheck = cancellationCheck,
-                            )
+            performanceTrace.measureOrRun("zip_entry_iteration") {
+                ZipFile(apkFile).use { zipFile ->
+                    val entries = zipFile.entries()
+                    while (entries.hasMoreElements()) {
+                        cancellationCheck()
+                        val entry = entries.nextElement()
+                        if (entry.isDirectory) continue
+                        val evidence = "${apkFile.name}!/${entry.name}"
+                        when {
+                            entry.name.matches(DEX_ENTRY_PATTERN) -> zipFile.getInputStream(entry).use { input ->
+                                scanDexEntry(
+                                    input = input,
+                                    evidencePrefix = evidence,
+                                    summary = summary,
+                                    cancellationCheck = cancellationCheck,
+                                    performanceTrace = performanceTrace,
+                                )
+                            }
+                            entry.name.endsWith(".so") -> zipFile.getInputStream(entry).use { input ->
+                                scanNativeEntry(
+                                    input = input,
+                                    evidencePrefix = evidence,
+                                    summary = summary,
+                                    cancellationCheck = cancellationCheck,
+                                    performanceTrace = performanceTrace,
+                                )
+                            }
                         }
                     }
                 }
@@ -227,97 +250,216 @@ class AppSemanticAnalyzer @Inject constructor() {
         evidencePrefix: String,
         summary: MutableSemanticSummary,
         cancellationCheck: () -> Unit,
+        performanceTrace: AppSemanticAnalyzerPerformanceTrace?,
     ) {
         cancellationCheck()
-        val bytes = input.readBytes()
-        val dexFile = runCatching {
-            DexBackedDexFile(Opcodes.getDefault(), bytes)
-        }.getOrNull() ?: return
+        performanceTrace?.count("dex_entry_attempt_count")
+        val dexStartedAt = System.nanoTime()
+        val dexMetrics = performanceTrace?.let { MutableDexEntryMetrics(entryName = evidencePrefix) }
+        var dexReadMillis = 0L
+        val bytes = performanceTrace.measureOrRun("dex_read") {
+            val startedAt = System.nanoTime()
+            input.readBytes()
+                .also {
+                    dexReadMillis = elapsedMillis(startedAt)
+                }
+        }
+        dexMetrics?.dexReadMillis = dexReadMillis
+        val dexFile = performanceTrace.measureOrRun("dex_parse") {
+            runCatching {
+                DexBackedDexFile(Opcodes.getDefault(), bytes)
+            }.getOrNull()
+        } ?: return
+        performanceTrace?.count("dex_entry_count")
 
-        val classes = dexFile.classes.toList()
-        val appClassPrefixes = inferAppClassPrefixes(
-            classes = classes,
-            packageName = summary.packageName,
-        )
-        summary.appClassPrefixes += appClassPrefixes
-        val semanticSummaries = buildDexSemanticSummaries(
-            classes = classes,
-            packageName = summary.packageName,
-            appClassPrefixes = appClassPrefixes,
-            cancellationCheck = cancellationCheck,
-        )
-
-        classes.forEachIndexed { classIndex, classDef ->
-            if (classIndex % CANCELLATION_CHECK_CLASS_INTERVAL == 0) {
-                cancellationCheck()
+        val classes = performanceTrace.measureOrRun("dex_class_materialization") {
+            dexFile.classes.toList()
+        }
+        performanceTrace?.count("dex_class_count", classes.size.toLong())
+        dexMetrics?.classCount = classes.size.toLong()
+        if (performanceTrace != null) {
+            var totalMethods = 0L
+            var methodsWithImplementation = 0L
+            classes.forEach { classDef ->
+                classDef.methods.forEach { method ->
+                    totalMethods += 1
+                    if (method.implementation != null) {
+                        methodsWithImplementation += 1
+                    }
+                }
             }
-            val className = dexTypeName(classDef.type)
-            val scope = scopeForClass(
-                className = className,
+            performanceTrace.count("dex_method_count_total", totalMethods)
+            performanceTrace.count("dex_method_count_with_implementation", methodsWithImplementation)
+            dexMetrics?.methodCountTotal = totalMethods
+            dexMetrics?.methodCountWithImplementation = methodsWithImplementation
+        }
+        val appClassPrefixes = performanceTrace.measureOrRun("app_prefix_inference") {
+            inferAppClassPrefixes(
+                classes = classes,
+                packageName = summary.packageName,
+            )
+        }
+        summary.appClassPrefixes += appClassPrefixes
+        var summaryMillis = 0L
+        val semanticSummaries = performanceTrace.measureOrRun("dex_summary_total") {
+            val startedAt = System.nanoTime()
+            val result = buildDexSemanticSummaries(
+                classes = classes,
                 packageName = summary.packageName,
                 appClassPrefixes = appClassPrefixes,
+                cancellationCheck = cancellationCheck,
+                performanceTrace = performanceTrace,
+                dexMetrics = dexMetrics,
             )
-            if (scope == AppSemanticRiskScope.SDK_CODE && shouldSkipSdkInfrastructureClass(className)) {
-                return@forEachIndexed
-            }
-            val source = when (scope) {
-                AppSemanticRiskScope.APP_CODE -> AppSemanticEvidenceSource.DIRECT_APP_CODE
-                AppSemanticRiskScope.SDK_CODE -> AppSemanticEvidenceSource.SDK
-                AppSemanticRiskScope.NATIVE_CODE -> AppSemanticEvidenceSource.NATIVE
-                AppSemanticRiskScope.MANIFEST -> AppSemanticEvidenceSource.MANIFEST_ONLY
-                AppSemanticRiskScope.CROSS_LAYER -> AppSemanticEvidenceSource.APP_TO_SDK
-            }
+            summaryMillis = elapsedMillis(startedAt)
+            result
+        }
+        dexMetrics?.summaryMillis = summaryMillis
 
-            classDef.methods.forEachIndexed { methodIndex, method ->
-                if (methodIndex % CANCELLATION_CHECK_METHOD_INTERVAL == 0) {
+        var finalAnalysisMillis = 0L
+        performanceTrace.measureOrRun("dex_final_method_analysis") {
+            val startedAt = System.nanoTime()
+            classes.forEachIndexed { classIndex, classDef ->
+                if (classIndex % CANCELLATION_CHECK_CLASS_INTERVAL == 0) {
                     cancellationCheck()
                 }
-                val methodName = methodNameWithParameters(method.name, method.parameterTypes)
-                val evidence = "$evidencePrefix:$className#${method.name}"
-                if (method.isNativeDeclaration()) {
-                    summary.addNativeBridgeCandidate(
-                        NativeBridgeCandidate(
-                            scope = scope,
-                            source = source,
-                            className = className,
-                            methodName = methodName,
-                            simpleMethodName = method.name,
-                            evidence = "$evidence -> native declaration",
-                        ),
-                    )
-                    summary.addFact(
-                        fact(
-                            kind = SemanticFactKind.NATIVE_METHOD_DECLARATION,
-                            scope = scope,
-                            source = source,
-                            evidence = "$evidence -> native declaration",
-                            value = method.name,
-                            className = className,
-                            methodName = methodName,
-                        ),
-                    )
-                }
-                val implementation = method.implementation ?: return@forEachIndexed
-                val semantics = analyzeMethod(
-                    evidence = evidence,
+                val className = dexTypeName(classDef.type)
+                val scope = scopeForClass(
                     className = className,
-                    methodName = methodName,
                     packageName = summary.packageName,
                     appClassPrefixes = appClassPrefixes,
-                    semanticSummaries = semanticSummaries,
-                    scope = scope,
-                    source = source,
-                    instructions = implementation.instructions,
-                    cancellationCheck = cancellationCheck,
                 )
-                summary.methodsAnalyzed += 1
-                summary.cfgNodeCount += semantics.cfgNodes
-                summary.cfgEdgeCount += semantics.cfgEdges
-                summary.dfgEdgeCount += semantics.dfgEdges
-                semantics.facts.forEach(summary::addFact)
-                semantics.calls.forEach(summary::addMethodCall)
+                if (scope == AppSemanticRiskScope.SDK_CODE && shouldSkipSdkInfrastructureClass(className)) {
+                    performanceTrace?.count("final_classes_skipped_sdk_infra")
+                    dexMetrics?.finalClassesSkippedSdkInfra = dexMetrics?.finalClassesSkippedSdkInfra?.plus(1L) ?: 1L
+                    if (performanceTrace != null) {
+                        var skippedMethods = 0L
+                        classDef.methods.forEach { method ->
+                            if (method.implementation != null) skippedMethods += 1
+                        }
+                        performanceTrace.count("final_methods_skipped_sdk_infra", skippedMethods)
+                        dexMetrics?.finalMethodsSkippedSdkInfra =
+                            dexMetrics?.finalMethodsSkippedSdkInfra?.plus(skippedMethods) ?: skippedMethods
+                    }
+                    return@forEachIndexed
+                }
+                performanceTrace?.count("final_classes_visited")
+                dexMetrics?.finalClassesVisited = dexMetrics?.finalClassesVisited?.plus(1L) ?: 1L
+                val source = when (scope) {
+                    AppSemanticRiskScope.APP_CODE -> AppSemanticEvidenceSource.DIRECT_APP_CODE
+                    AppSemanticRiskScope.SDK_CODE -> AppSemanticEvidenceSource.SDK
+                    AppSemanticRiskScope.NATIVE_CODE -> AppSemanticEvidenceSource.NATIVE
+                    AppSemanticRiskScope.MANIFEST -> AppSemanticEvidenceSource.MANIFEST_ONLY
+                    AppSemanticRiskScope.CROSS_LAYER -> AppSemanticEvidenceSource.APP_TO_SDK
+                }
+
+                classDef.methods.forEachIndexed { methodIndex, method ->
+                    if (methodIndex % CANCELLATION_CHECK_METHOD_INTERVAL == 0) {
+                        cancellationCheck()
+                    }
+                    val methodName = methodNameWithParameters(method.name, method.parameterTypes)
+                    val evidence = "$evidencePrefix:$className#${method.name}"
+                    if (method.isNativeDeclaration()) {
+                        summary.addNativeBridgeCandidate(
+                            NativeBridgeCandidate(
+                                scope = scope,
+                                source = source,
+                                className = className,
+                                methodName = methodName,
+                                simpleMethodName = method.name,
+                                evidence = "$evidence -> native declaration",
+                            ),
+                        )
+                        summary.addFact(
+                            fact(
+                                kind = SemanticFactKind.NATIVE_METHOD_DECLARATION,
+                                scope = scope,
+                                source = source,
+                                evidence = "$evidence -> native declaration",
+                                value = method.name,
+                                className = className,
+                                methodName = methodName,
+                            ),
+                        )
+                    }
+                    val implementation = method.implementation ?: return@forEachIndexed
+                    val semantics = analyzeMethod(
+                        evidence = evidence,
+                        className = className,
+                        methodName = methodName,
+                        packageName = summary.packageName,
+                        appClassPrefixes = appClassPrefixes,
+                        semanticSummaries = semanticSummaries,
+                        scope = scope,
+                        source = source,
+                        instructions = implementation.instructions,
+                        cancellationCheck = cancellationCheck,
+                        performanceTrace = performanceTrace,
+                    )
+                    summary.methodsAnalyzed += 1
+                    performanceTrace?.count("final_methods_analyzed")
+                    dexMetrics?.finalMethodsAnalyzed = dexMetrics?.finalMethodsAnalyzed?.plus(1L) ?: 1L
+                    dexMetrics?.instructionsVisitedFinal =
+                        dexMetrics?.instructionsVisitedFinal?.plus(semantics.instructionsVisited.toLong())
+                            ?: semantics.instructionsVisited.toLong()
+                    dexMetrics?.invokeInstructionsFinal =
+                        dexMetrics?.invokeInstructionsFinal?.plus(semantics.invokeInstructionCount.toLong())
+                            ?: semantics.invokeInstructionCount.toLong()
+                    dexMetrics?.handleInvokeCalls =
+                        dexMetrics?.handleInvokeCalls?.plus(semantics.handleInvokeCount.toLong())
+                            ?: semantics.handleInvokeCount.toLong()
+                    dexMetrics?.handleInvokeNanosFinal =
+                        dexMetrics?.handleInvokeNanosFinal?.plus(semantics.handleInvokeNanos)
+                            ?: semantics.handleInvokeNanos
+                    dexMetrics?.instructionEvidenceBuildsFinal =
+                        dexMetrics?.instructionEvidenceBuildsFinal?.plus(semantics.instructionEvidenceBuildCount.toLong())
+                            ?: semantics.instructionEvidenceBuildCount.toLong()
+                    dexMetrics?.registerListCallsFinal =
+                        dexMetrics?.registerListCallsFinal?.plus(semantics.registerListCallCount.toLong())
+                            ?: semantics.registerListCallCount.toLong()
+                    dexMetrics?.methodSignatureWithArgumentsCallsFinal =
+                        dexMetrics?.methodSignatureWithArgumentsCallsFinal
+                            ?.plus(semantics.methodSignatureWithArgumentsCallCount.toLong())
+                            ?: semantics.methodSignatureWithArgumentsCallCount.toLong()
+                    dexMetrics?.methodSignatureWithArgumentsNanosFinal =
+                        dexMetrics?.methodSignatureWithArgumentsNanosFinal
+                            ?.plus(semantics.methodSignatureWithArgumentsNanos)
+                            ?: semantics.methodSignatureWithArgumentsNanos
+                    dexMetrics?.methodCallCandidatesFinal =
+                        dexMetrics?.methodCallCandidatesFinal?.plus(semantics.methodCallCandidates.toLong())
+                            ?: semantics.methodCallCandidates.toLong()
+                    dexMetrics?.methodCallsDiscardedFinal =
+                        dexMetrics?.methodCallsDiscardedFinal?.plus(semantics.methodCallsDiscarded.toLong())
+                            ?: semantics.methodCallsDiscarded.toLong()
+                    dexMetrics?.methodCallsDiscardedPlatformFinal =
+                        dexMetrics?.methodCallsDiscardedPlatformFinal
+                            ?.plus(semantics.methodCallsDiscardedPlatform.toLong())
+                            ?: semantics.methodCallsDiscardedPlatform.toLong()
+                    dexMetrics?.methodCallsDiscardedBlankTargetFinal =
+                        dexMetrics?.methodCallsDiscardedBlankTargetFinal
+                            ?.plus(semantics.methodCallsDiscardedBlankTarget.toLong())
+                            ?: semantics.methodCallsDiscardedBlankTarget.toLong()
+                    if (semantics.hasCfg) {
+                        dexMetrics?.methodsWithCfg = dexMetrics?.methodsWithCfg?.plus(1L) ?: 1L
+                    }
+                    dexMetrics?.factsEmittedFinal =
+                        dexMetrics?.factsEmittedFinal?.plus(semantics.facts.size.toLong())
+                            ?: semantics.facts.size.toLong()
+                    dexMetrics?.methodCallsRetainedFinal =
+                        dexMetrics?.methodCallsRetainedFinal?.plus(semantics.calls.size.toLong())
+                            ?: semantics.calls.size.toLong()
+                    summary.cfgNodeCount += semantics.cfgNodes
+                    summary.cfgEdgeCount += semantics.cfgEdges
+                    summary.dfgEdgeCount += semantics.dfgEdges
+                    semantics.facts.forEach(summary::addFact)
+                    semantics.calls.forEach(summary::addMethodCall)
+                }
             }
+            finalAnalysisMillis = elapsedMillis(startedAt)
         }
+        dexMetrics?.finalAnalysisMillis = finalAnalysisMillis
+        dexMetrics?.durationMillis = elapsedMillis(dexStartedAt)
+        dexMetrics?.toTraceMetrics()?.let(performanceTrace::recordDexEntry)
     }
 
     private fun scanNativeEntry(
@@ -325,29 +467,51 @@ class AppSemanticAnalyzer @Inject constructor() {
         evidencePrefix: String,
         summary: MutableSemanticSummary,
         cancellationCheck: () -> Unit,
+        performanceTrace: AppSemanticAnalyzerPerformanceTrace?,
     ) {
         cancellationCheck()
         val libraryName = nativeLibraryName(evidencePrefix)
-        val bytes = input.readBytes()
-        extractAsciiStrings(bytes).forEachIndexed { index, value ->
-            if (index % CANCELLATION_CHECK_NATIVE_STRING_INTERVAL == 0) {
-                cancellationCheck()
-            }
-            summary.addNativeLibraryText(libraryName, evidencePrefix, value)
-            scanNativeText(
-                value = value,
-                evidence = "$evidencePrefix -> $value",
-                libraryName = libraryName,
-                summary = summary,
-            )
+        val bytes = performanceTrace.measureOrRun("native_read") {
+            input.readBytes()
         }
+        performanceTrace?.count("native_libraries_scanned")
+        performanceTrace?.count("native_bytes_scanned", bytes.size.toLong())
+        val symbolTextsBefore = summary.nativeLibrarySymbolTextCount(libraryName)
+        val jniSymbolTextsBefore = summary.nativeLibraryJniSymbolTextCount(libraryName)
+        var nativeStringsSeen = 0L
+        performanceTrace.measureOrRun("native_string_scan") {
+            extractAsciiStrings(bytes).forEachIndexed { index, value ->
+                nativeStringsSeen += 1
+                if (index % CANCELLATION_CHECK_NATIVE_STRING_INTERVAL == 0) {
+                    cancellationCheck()
+                }
+                summary.addNativeLibraryText(libraryName, evidencePrefix, value)
+                scanNativeText(
+                    value = value,
+                    evidencePrefix = evidencePrefix,
+                    libraryName = libraryName,
+                    summary = summary,
+                    performanceTrace = performanceTrace,
+                )
+            }
+        }
+        performanceTrace?.count("native_strings_seen", nativeStringsSeen)
+        performanceTrace?.count(
+            "native_symbol_texts_retained",
+            summary.nativeLibrarySymbolTextCount(libraryName) - symbolTextsBefore,
+        )
+        performanceTrace?.count(
+            "native_jni_symbol_texts_retained",
+            summary.nativeLibraryJniSymbolTextCount(libraryName) - jniSymbolTextsBefore,
+        )
     }
 
     private fun scanNativeText(
         value: String,
-        evidence: String,
+        evidencePrefix: String,
         libraryName: String,
         summary: MutableSemanticSummary,
+        performanceTrace: AppSemanticAnalyzerPerformanceTrace?,
     ) {
         if (value.length > MAX_NATIVE_REGEX_TEXT_LENGTH) return
         val fact = when {
@@ -363,6 +527,8 @@ class AppSemanticAnalyzer @Inject constructor() {
             isNativeSocksOrLocalProxyProbeText(value) -> SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE
             else -> null
         } ?: return
+        performanceTrace?.count("native_evidence_strings_built")
+        val evidence = "$evidencePrefix -> $value"
         val semanticFact = SemanticFact(
             kind = fact,
             scope = AppSemanticRiskScope.NATIVE_CODE,
@@ -380,72 +546,123 @@ class AppSemanticAnalyzer @Inject constructor() {
         packageName: String,
         appClassPrefixes: Set<String>,
         cancellationCheck: () -> Unit,
+        performanceTrace: AppSemanticAnalyzerPerformanceTrace?,
+        dexMetrics: MutableDexEntryMetrics?,
     ): DexSemanticSummaries {
         val summaries = DexSemanticSummaries()
-        classes.forEachIndexed { classIndex, classDef ->
-            if (classIndex % CANCELLATION_CHECK_CLASS_INTERVAL == 0) {
-                cancellationCheck()
-            }
-            classDef.methods.forEach { method ->
-                val implementation = method.implementation ?: return@forEach
-                if (method.name != "<init>") return@forEach
-                val key = methodKey(
-                    className = dexTypeName(classDef.type),
-                    methodName = methodNameWithParameters(method.name, method.parameterTypes),
-                )
-                val parameterRegisters = parameterRegisterMap(method, implementation.registerCount)
-                val registerParameterAliases = parameterRegisters.toMutableMap()
-                implementation.instructions.forEach { instruction ->
-                    val opcode = opcodeKey(instruction)
-                    movedRegisterPair(instruction)?.let { (destination, sourceRegister) ->
-                        registerParameterAliases[sourceRegister]?.let { parameterIndex ->
-                            registerParameterAliases[destination] = parameterIndex
-                        }
-                    }
-                    val reference = (instruction as? ReferenceInstruction)?.reference as? FieldReference
-                    if (!opcode.startsWith("iput") || reference == null) return@forEach
-                    val registers = instruction.registerList()
-                    val valueRegister = registers.firstOrNull() ?: return@forEach
-                    val parameterIndex = registerParameterAliases[valueRegister] ?: return@forEach
-                    summaries.constructorParameterFields
-                        .getOrPut(key) { mutableMapOf() }
-                        .getOrPut(parameterIndex) { mutableSetOf() }
-                        .add(fieldKey(reference))
-                }
-            }
-        }
-
-        repeat(METHOD_SUMMARY_ITERATIONS) {
-            var changed = false
+        var constructorMethodsVisited = 0L
+        var constructorInstructionsVisited = 0L
+        var constructorOpcodeKeyCalls = 0L
+        var constructorRegisterReads = 0L
+        performanceTrace.measureOrRun("summary_constructor_pass") {
             classes.forEachIndexed { classIndex, classDef ->
                 if (classIndex % CANCELLATION_CHECK_CLASS_INTERVAL == 0) {
                     cancellationCheck()
                 }
-                val className = dexTypeName(classDef.type)
                 classDef.methods.forEach { method ->
                     val implementation = method.implementation ?: return@forEach
+                    if (method.name != "<init>") return@forEach
+                    constructorMethodsVisited += 1
                     val key = methodKey(
-                        className = className,
+                        className = dexTypeName(classDef.type),
                         methodName = methodNameWithParameters(method.name, method.parameterTypes),
                     )
-                    val flow = summarizeMethodFlow(
-                        method = method,
-                        instructions = implementation.instructions,
-                        packageName = packageName,
-                        appClassPrefixes = appClassPrefixes,
-                        summaries = summaries,
-                    )
-                    if (flow.returnTags.isNotEmpty()) {
-                        val target = summaries.methodReturnTags.getOrPut(key) { mutableSetOf() }
-                        changed = target.addAll(flow.returnTags) || changed
-                    }
-                    flow.fieldTags.forEach { (field, tags) ->
-                        val target = summaries.fieldTags.getOrPut(field) { mutableSetOf() }
-                        changed = target.addAll(tags) || changed
+                    val parameterRegisters = parameterRegisterMap(method, implementation.registerCount)
+                    val registerParameterAliases = parameterRegisters.toMutableMap()
+                    implementation.instructions.forEach { instruction ->
+                        constructorInstructionsVisited += 1
+                        constructorOpcodeKeyCalls += 1
+                        val opcode = opcodeKey(instruction)
+                        movedRegisterPair(instruction, opcode)?.let { (destination, sourceRegister) ->
+                            registerParameterAliases[sourceRegister]?.let { parameterIndex ->
+                                registerParameterAliases[destination] = parameterIndex
+                            }
+                        }
+                        val reference = (instruction as? ReferenceInstruction)?.reference as? FieldReference
+                        if (!opcode.startsWith("iput") || reference == null) return@forEach
+                        constructorRegisterReads += 1
+                        val valueRegister = firstRegister(instruction) ?: return@forEach
+                        val parameterIndex = registerParameterAliases[valueRegister] ?: return@forEach
+                        summaries.constructorParameterFields
+                            .getOrPut(key) { mutableMapOf() }
+                            .getOrPut(parameterIndex) { mutableSetOf() }
+                            .add(fieldKey(reference))
                     }
                 }
             }
-            if (!changed) return@repeat
+        }
+        performanceTrace?.count("summary_constructor_methods_visited", constructorMethodsVisited)
+        performanceTrace?.count("summary_constructor_instructions_visited", constructorInstructionsVisited)
+        performanceTrace?.count("opcode_key_calls_summary_constructor", constructorOpcodeKeyCalls)
+        performanceTrace?.count("register_reads_summary_constructor", constructorRegisterReads)
+
+        for (iteration in 0 until METHOD_SUMMARY_ITERATIONS) {
+            var changed = false
+            var iterationMethodsVisited = 0L
+            var iterationInstructionsVisited = 0L
+            var iterationOpcodeKeyCalls = 0L
+            var iterationRegisterReads = 0L
+            performanceTrace.measureOrRun("summary_iteration_${iteration + 1}") {
+                classes.forEachIndexed { classIndex, classDef ->
+                    if (classIndex % CANCELLATION_CHECK_CLASS_INTERVAL == 0) {
+                        cancellationCheck()
+                    }
+                    val className = dexTypeName(classDef.type)
+                    classDef.methods.forEach { method ->
+                        val implementation = method.implementation ?: return@forEach
+                        iterationMethodsVisited += 1
+                        val key = methodKey(
+                            className = className,
+                            methodName = methodNameWithParameters(method.name, method.parameterTypes),
+                        )
+                        val flow = summarizeMethodFlow(
+                            method = method,
+                            instructions = implementation.instructions,
+                            packageName = packageName,
+                            appClassPrefixes = appClassPrefixes,
+                            summaries = summaries,
+                        )
+                        iterationInstructionsVisited += flow.instructionsVisited
+                        iterationOpcodeKeyCalls += flow.opcodeKeyCalls
+                        iterationRegisterReads += flow.registerReads
+                        if (flow.returnTags.isNotEmpty()) {
+                            val target = summaries.methodReturnTags.getOrPut(key) { mutableSetOf() }
+                            changed = target.addAll(flow.returnTags) || changed
+                        }
+                        flow.fieldTags.forEach { (field, tags) ->
+                            val target = summaries.fieldTags.getOrPut(field) { mutableSetOf() }
+                            changed = target.addAll(tags) || changed
+                        }
+                    }
+                }
+            }
+            performanceTrace?.count("summary_methods_visited", iterationMethodsVisited)
+            performanceTrace?.count("summary_iteration_${iteration + 1}_methods_visited", iterationMethodsVisited)
+            performanceTrace?.count("summary_instructions_visited", iterationInstructionsVisited)
+            performanceTrace?.count("summary_iteration_${iteration + 1}_instructions_visited", iterationInstructionsVisited)
+            performanceTrace?.count("opcode_key_calls_summary", iterationOpcodeKeyCalls)
+            performanceTrace?.count("summary_iteration_${iteration + 1}_opcode_key_calls", iterationOpcodeKeyCalls)
+            performanceTrace?.count("register_reads_summary", iterationRegisterReads)
+            performanceTrace?.count("summary_iteration_${iteration + 1}_register_reads", iterationRegisterReads)
+            performanceTrace?.count("summary_iterations_executed")
+            dexMetrics?.summaryMethodsVisited =
+                dexMetrics?.summaryMethodsVisited?.plus(iterationMethodsVisited) ?: iterationMethodsVisited
+            dexMetrics?.summaryInstructionsVisited =
+                dexMetrics?.summaryInstructionsVisited?.plus(iterationInstructionsVisited) ?: iterationInstructionsVisited
+            dexMetrics?.summaryIterationsExecuted =
+                dexMetrics?.summaryIterationsExecuted?.plus(1L) ?: 1L
+            if (changed) {
+                performanceTrace?.count("summary_iterations_changed")
+                performanceTrace?.count("summary_iteration_${iteration + 1}_changed")
+                dexMetrics?.summaryIterationsChanged =
+                    dexMetrics?.summaryIterationsChanged?.plus(1L) ?: 1L
+            } else {
+                performanceTrace?.count("summary_iterations_no_change")
+                performanceTrace?.count("summary_iteration_${iteration + 1}_no_change")
+                dexMetrics?.summaryIterationsNoChange =
+                    dexMetrics?.summaryIterationsNoChange?.plus(1L) ?: 1L
+            }
+            if (!changed) break
         }
         return summaries
     }
@@ -465,6 +682,10 @@ class AppSemanticAnalyzer @Inject constructor() {
         var pendingResultTags = emptySet<DataTag>()
         var branchDerivedTags = emptySet<DataTag>()
         var branchDerivedCountdown = 0
+        var instructionsVisited = 0
+        var opcodeKeyCalls = 0
+        var registerReads = 0
+        val registerBuffer = InstructionRegisterBuffer()
 
         fun tagRegister(
             register: Int,
@@ -480,18 +701,35 @@ class AppSemanticAnalyzer @Inject constructor() {
             registerInts.remove(register)
         }
 
+        fun readRegisters(instruction: Instruction): InstructionRegisterBuffer {
+            registerReads += 1
+            return registerBuffer.readFrom(instruction)
+        }
+
+        fun collectVpnProxyTags(registers: InstructionRegisterBuffer): Set<DataTag> {
+            val tags = mutableSetOf<DataTag>()
+            registers.forEach { register ->
+                registerTags[register].orEmpty().forEach { tag ->
+                    if (tag.isVpnOrProxyData()) {
+                        tags += tag
+                    }
+                }
+            }
+            return tags
+        }
+
         instructions.forEach { instruction ->
+            instructionsVisited += 1
+            opcodeKeyCalls += 1
             val opcode = opcodeKey(instruction)
+            val isIfOpcode = opcode.startsWith("if-")
             if (
-                opcode.startsWith("if-") &&
-                instruction.registerList().any { register ->
+                isIfOpcode &&
+                readRegisters(instruction).any { register ->
                     registerTags[register].orEmpty().any { tag -> tag.isVpnOrProxyData() }
                 }
             ) {
-                branchDerivedTags = instruction.registerList()
-                    .flatMap { register -> registerTags[register].orEmpty() }
-                    .filter { tag -> tag.isVpnOrProxyData() }
-                    .toSet()
+                branchDerivedTags = collectVpnProxyTags(registerBuffer)
                 branchDerivedCountdown = BRANCH_DERIVED_TAG_INSTRUCTION_WINDOW
             }
 
@@ -510,7 +748,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                 (instruction as? ReferenceInstruction)?.reference
             }.getOrNull()
 
-            if (isConstStringInstruction(instruction) && reference is StringReference) {
+            if (isConstStringOpcode(opcode) && reference is StringReference) {
                 val register = (instruction as? OneRegisterInstruction)?.registerA
                 if (register != null) {
                     clearRegister(register)
@@ -521,7 +759,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                     }
                 }
             }
-            if (isConstNumberInstruction(instruction)) {
+            if (isConstNumberOpcode(opcode)) {
                 val register = (instruction as? OneRegisterInstruction)?.registerA
                 val literal = (instruction as? NarrowLiteralInstruction)?.narrowLiteral?.toLong()
                     ?: (instruction as? WideLiteralInstruction)?.wideLiteral
@@ -551,7 +789,8 @@ class AppSemanticAnalyzer @Inject constructor() {
                         }
                     }
                     opcode.startsWith("iput") || opcode.startsWith("sput") -> {
-                        val valueRegister = instruction.registerList().firstOrNull()
+                        val valueRegister = firstRegister(instruction)
+                        registerReads += 1
                         val valueTags = valueRegister?.let { registerTags[it].orEmpty() }.orEmpty()
                         if (valueTags.any { it.isVpnOrProxyData() }) {
                             learnedFieldTags.getOrPut(field) { mutableSetOf() }.addAll(valueTags)
@@ -561,11 +800,11 @@ class AppSemanticAnalyzer @Inject constructor() {
             }
 
             if (opcode.startsWith("invoke") && reference is MethodReference) {
-                val argumentRegisters = instruction.registerList()
-                val argumentTagsByIndex = argumentRegisters.map { registerTags[it].orEmpty().toSet() }
+                val argumentRegisters = readRegisters(instruction)
+                val argumentTagsByIndex = argumentRegisters.mapToList { registerTags[it].orEmpty().toSet() }
                 val argumentTags = argumentTagsByIndex.flatten().toSet()
-                val argumentStrings = argumentRegisters.mapNotNull(registerStrings::get)
-                val argumentInts = argumentRegisters.mapNotNull(registerInts::get)
+                val argumentStrings = argumentRegisters.mapNotNullToList(registerStrings::get)
+                val argumentInts = argumentRegisters.mapNotNullToList(registerInts::get)
                 val targetKey = methodKey(reference)
                 val resultTags = mutableSetOf<DataTag>()
                 resultTags += knownInvokeResultTags(
@@ -597,7 +836,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                 }
             }
 
-            if (branchDerivedCountdown > 0 && !opcode.startsWith("if-")) {
+            if (branchDerivedCountdown > 0 && !isIfOpcode) {
                 branchDerivedCountdown -= 1
                 if (branchDerivedCountdown == 0) {
                     branchDerivedTags = emptySet()
@@ -605,7 +844,7 @@ class AppSemanticAnalyzer @Inject constructor() {
             }
 
             if (!opcode.startsWith("move-result")) {
-                val movedTags = movedRegisterPair(instruction)
+                val movedTags = movedRegisterPair(instruction, opcode)
                 if (movedTags != null) {
                     val (destination, sourceRegister) = movedTags
                     clearRegister(destination)
@@ -613,7 +852,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                     registerStrings[sourceRegister]?.let { value -> registerStrings[destination] = value }
                     registerInts[sourceRegister]?.let { value -> registerInts[destination] = value }
                 } else {
-                    definedRegister(instruction)?.let(::clearRegister)
+                    definedRegister(instruction, opcode)?.let(::clearRegister)
                 }
             }
         }
@@ -623,6 +862,9 @@ class AppSemanticAnalyzer @Inject constructor() {
             fieldTags = learnedFieldTags
                 .mapValues { (_, tags) -> tags.filterTo(mutableSetOf()) { tag -> tag.isSummaryTag() } }
                 .filterValues { it.isNotEmpty() },
+            instructionsVisited = instructionsVisited,
+            opcodeKeyCalls = opcodeKeyCalls,
+            registerReads = registerReads,
         )
     }
 
@@ -637,6 +879,7 @@ class AppSemanticAnalyzer @Inject constructor() {
         source: AppSemanticEvidenceSource,
         instructions: Iterable<Instruction>,
         cancellationCheck: () -> Unit,
+        performanceTrace: AppSemanticAnalyzerPerformanceTrace?,
     ): MethodSemanticResult {
         cancellationCheck()
         val facts = mutableListOf<SemanticFact>()
@@ -650,6 +893,24 @@ class AppSemanticAnalyzer @Inject constructor() {
         val methodCalls = mutableListOf<MethodCall>()
         var branchDerivedTags = emptySet<DataTag>()
         var branchDerivedCountdown = 0
+        var instructionsVisited = 0
+        var referenceInstructionCount = 0
+        var invokeInstructionCount = 0
+        var handleInvokeCount = 0
+        var handleInvokeNanos = 0L
+        val instructionEvidenceBuilder = InstructionEvidenceBuilder(evidence)
+        var registerListCallCount = 0
+        var methodSignatureWithArgumentsCallCount = 0
+        var methodSignatureWithArgumentsNanos = 0L
+        var methodCallCandidates = 0
+        var methodCallsDiscarded = 0
+        var methodCallsDiscardedPlatform = 0
+        var methodCallsDiscardedBlankTarget = 0
+        var opcodeKeyCallCount = 0
+        var argumentTagsBuilt = 0
+        var argumentStringsBuilt = 0
+        var argumentIntsBuilt = 0
+        val registerBuffer = InstructionRegisterBuffer()
 
         fun addFact(
             kind: SemanticFactKind,
@@ -688,26 +949,53 @@ class AppSemanticAnalyzer @Inject constructor() {
             registerInts.remove(register)
         }
 
+        fun readInstructionRegisters(instruction: Instruction): InstructionRegisterBuffer {
+            registerListCallCount += 1
+            return registerBuffer.readFrom(instruction)
+        }
+
+        fun instructionOpcode(instruction: Instruction): String {
+            opcodeKeyCallCount += 1
+            return opcodeKey(instruction)
+        }
+
+        fun formatMethodSignatureWithArguments(
+            reference: MethodReference,
+            argumentStrings: List<String>,
+            argumentInts: List<Long>,
+        ): String {
+            methodSignatureWithArgumentsCallCount += 1
+            val startedAt = if (performanceTrace != null) System.nanoTime() else 0L
+            val signature = methodSignatureWithArguments(
+                reference = reference,
+                argumentStrings = argumentStrings,
+                argumentInts = argumentInts,
+            )
+            if (performanceTrace != null) {
+                methodSignatureWithArgumentsNanos += System.nanoTime() - startedAt
+            }
+            return signature
+        }
+
         instructions.forEachIndexed { index, instruction ->
+            instructionsVisited += 1
             if (instruction is OffsetInstruction) {
                 branchCount += 1
             }
             if (index % CANCELLATION_CHECK_INSTRUCTION_INTERVAL == 0) {
                 cancellationCheck()
             }
-            val opcode = opcodeKey(instruction)
-            val instructionEvidence = "$evidence@$index:$opcode"
+            val opcode = instructionOpcode(instruction)
+            instructionEvidenceBuilder.reset(index = index, opcode = opcode)
+            val isIfOpcode = opcode.startsWith("if-")
             if (
-                opcode.startsWith("if-") &&
-                instruction.registerList().any { register ->
+                isIfOpcode &&
+                readInstructionRegisters(instruction).any { register ->
                     registerTags[register].orEmpty().any { tag -> tag.isVpnOrProxyData() }
                 }
             ) {
                 taggedBranchCount += 1
-                branchDerivedTags = instruction.registerList()
-                    .flatMap { register -> registerTags[register].orEmpty() }
-                    .filter { tag -> tag.isVpnOrProxyData() }
-                    .toSet()
+                branchDerivedTags = registerBuffer.collectTags(registerTags) { tag -> tag.isVpnOrProxyData() }
                 branchDerivedCountdown = BRANCH_DERIVED_TAG_INSTRUCTION_WINDOW
             }
 
@@ -726,8 +1014,11 @@ class AppSemanticAnalyzer @Inject constructor() {
             val reference = runCatching {
                 (instruction as? ReferenceInstruction)?.reference
             }.getOrNull()
+            if (reference != null) {
+                referenceInstructionCount += 1
+            }
 
-            if (isConstStringInstruction(instruction) && reference is StringReference) {
+            if (isConstStringOpcode(opcode) && reference is StringReference) {
                 val register = (instruction as? OneRegisterInstruction)?.registerA
                 if (register != null) {
                     clearRegister(register)
@@ -739,7 +1030,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                     }
                 }
             }
-            if (isConstNumberInstruction(instruction)) {
+            if (isConstNumberOpcode(opcode)) {
                 val register = (instruction as? OneRegisterInstruction)?.registerA
                 val literal = (instruction as? NarrowLiteralInstruction)?.narrowLiteral?.toLong()
                     ?: (instruction as? WideLiteralInstruction)?.wideLiteral
@@ -756,7 +1047,7 @@ class AppSemanticAnalyzer @Inject constructor() {
             if (reference != null) {
                 scanReference(
                     reference = reference,
-                    evidence = instructionEvidence,
+                    evidence = instructionEvidenceBuilder,
                     addFact = ::addFact,
                     tagRegister = { tag ->
                         (instruction as? OneRegisterInstruction)?.registerA?.let { register ->
@@ -780,7 +1071,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                                 if (fieldTags.any { it.isVpnOrProxyData() }) {
                                     addFact(
                                         SemanticFactKind.VPN_DATA_CARRIER_FIELD,
-                                        "$instructionEvidence -> field ${fieldKey.displayName()} carries VPN/proxy data",
+                                        "${instructionEvidenceBuilder.value()} -> field ${fieldKey.displayName()} carries VPN/proxy data",
                                         fieldKey.displayName(),
                                     )
                                 }
@@ -788,13 +1079,14 @@ class AppSemanticAnalyzer @Inject constructor() {
                         }
                     }
                     opcode.startsWith("iput") || opcode.startsWith("sput") -> {
-                        val valueRegister = instruction.registerList().firstOrNull()
+                        val valueRegister = firstRegister(instruction)
+                        registerListCallCount += 1
                         val valueTags = valueRegister?.let { registerTags[it].orEmpty() }.orEmpty()
                         if (valueTags.any { it.isVpnOrProxyData() }) {
                             dfgEdges += valueTags.size
                             addFact(
                                 SemanticFactKind.VPN_DATA_CARRIER_FIELD,
-                                "$instructionEvidence -> field ${fieldKey.displayName()} receives VPN/proxy data",
+                                "${instructionEvidenceBuilder.value()} -> field ${fieldKey.displayName()} receives VPN/proxy data",
                                 fieldKey.displayName(),
                             )
                         }
@@ -803,14 +1095,21 @@ class AppSemanticAnalyzer @Inject constructor() {
             }
 
             if (opcode.startsWith("invoke")) {
+                invokeInstructionCount += 1
                 val invokedMethod = reference as? MethodReference
-                val argumentRegisters = instruction.registerList()
-                val argumentTags = argumentRegisters.flatMap { registerTags[it].orEmpty() }.toSet()
-                val argumentStrings = argumentRegisters.mapNotNull(registerStrings::get)
-                val argumentInts = argumentRegisters.mapNotNull(registerInts::get)
+                val argumentRegisters = readInstructionRegisters(instruction)
+                val argumentTags = argumentRegisters.collectTags(registerTags)
+                argumentTagsBuilt += 1
+                val argumentStrings = argumentRegisters.mapNotNullToList(registerStrings::get)
+                argumentStringsBuilt += 1
+                val argumentInts = argumentRegisters.mapNotNullToList(registerInts::get)
+                argumentIntsBuilt += 1
                 if (invokedMethod != null) {
+                    handleInvokeCount += 1
                     val targetClass = dexTypeName(invokedMethod.definingClass)
-                    if (targetClass.isNotBlank() && !PLATFORM_CLASS_PREFIXES.any { prefix -> targetClass.startsWith(prefix) }) {
+                    methodCallCandidates += 1
+                    val isPlatformTargetClass = PLATFORM_CLASS_PREFIXES.any { prefix -> targetClass.startsWith(prefix) }
+                    if (targetClass.isNotBlank() && !isPlatformTargetClass) {
                         methodCalls += MethodCall(
                             callerScope = scope,
                             source = source,
@@ -819,7 +1118,15 @@ class AppSemanticAnalyzer @Inject constructor() {
                             targetClass = targetClass,
                             targetMethod = methodNameWithParameters(invokedMethod.name, invokedMethod.parameterTypes),
                         )
+                    } else {
+                        methodCallsDiscarded += 1
+                        if (targetClass.isBlank()) {
+                            methodCallsDiscardedBlankTarget += 1
+                        } else if (isPlatformTargetClass) {
+                            methodCallsDiscardedPlatform += 1
+                        }
                     }
+                    val invokeStartedAt = if (performanceTrace != null) System.nanoTime() else 0L
                     val invokeSemantics = handleInvoke(
                         method = invokedMethod,
                         packageName = packageName,
@@ -829,16 +1136,20 @@ class AppSemanticAnalyzer @Inject constructor() {
                         argumentTags = argumentTags,
                         argumentStrings = argumentStrings,
                         argumentInts = argumentInts,
-                        evidence = instructionEvidence,
+                        evidence = instructionEvidenceBuilder,
                         addFact = ::addFact,
                         tagRegister = ::tagRegister,
+                        formatMethodSignatureWithArguments = ::formatMethodSignatureWithArguments,
                     )
+                    if (performanceTrace != null) {
+                        handleInvokeNanos += System.nanoTime() - invokeStartedAt
+                    }
                     val summaryTags = semanticSummaries.methodReturnTags[methodKey(invokedMethod)].orEmpty()
                     if (summaryTags.any { it.isVpnOrProxyData() }) {
                         dfgEdges += summaryTags.size
                         addFact(
                             SemanticFactKind.VPN_DATA_METHOD_RETURN,
-                            "$instructionEvidence -> ${methodSignature(invokedMethod)} returns VPN/proxy-derived data",
+                            "${instructionEvidenceBuilder.value()} -> ${methodSignature(invokedMethod)} returns VPN/proxy-derived data",
                             methodSignature(invokedMethod),
                         )
                     }
@@ -847,7 +1158,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                         argumentRegisters = argumentRegisters,
                         registerTags = registerTags,
                         summaries = semanticSummaries,
-                        evidence = instructionEvidence,
+                        evidence = instructionEvidenceBuilder,
                         addFact = ::addFact,
                         tagRegister = ::tagRegister,
                     )?.let { edges -> dfgEdges += edges }
@@ -858,7 +1169,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                         argumentStrings.any(::isPublicIpEndpoint) &&
                         invokedMethod.isNetworkTransportCall()
                     ) {
-                        val invokeSignature = methodSignatureWithArguments(
+                        val invokeSignature = formatMethodSignatureWithArguments(
                             reference = invokedMethod,
                             argumentStrings = argumentStrings,
                             argumentInts = argumentInts,
@@ -866,14 +1177,14 @@ class AppSemanticAnalyzer @Inject constructor() {
                         dfgEdges += argumentStrings.distinct().count(::isPublicIpEndpoint)
                         addFact(
                             SemanticFactKind.PUBLIC_IP_NETWORK_FLOW,
-                            "$instructionEvidence -> $invokeSignature",
+                            "${instructionEvidenceBuilder.value()} -> $invokeSignature",
                             methodSignature(invokedMethod),
                         )
                     }
                 }
             }
 
-            if (branchDerivedCountdown > 0 && !opcode.startsWith("if-")) {
+            if (branchDerivedCountdown > 0 && !isIfOpcode) {
                 branchDerivedCountdown -= 1
                 if (branchDerivedCountdown == 0) {
                     branchDerivedTags = emptySet()
@@ -881,7 +1192,7 @@ class AppSemanticAnalyzer @Inject constructor() {
             }
 
             if (!opcode.startsWith("move-result")) {
-                val movedTags = movedRegisterPair(instruction)
+                val movedTags = movedRegisterPair(instruction, opcode)
                 if (movedTags != null) {
                     val (destination, sourceRegister) = movedTags
                     clearRegister(destination)
@@ -892,12 +1203,14 @@ class AppSemanticAnalyzer @Inject constructor() {
                     registerStrings[sourceRegister]?.let { value -> registerStrings[destination] = value }
                     registerInts[sourceRegister]?.let { value -> registerInts[destination] = value }
                 } else {
-                    definedRegister(instruction)?.let(::clearRegister)
+                    definedRegister(instruction, opcode)?.let(::clearRegister)
                 }
             }
         }
 
-        val cfg = if (facts.isNotEmpty()) {
+        val hasCfg = facts.isNotEmpty()
+        val cfg = if (hasCfg) {
+            performanceTrace?.count("methods_with_cfg")
             buildCfg(instructions.toList())
         } else {
             CfgStats(nodes = 0, edges = 0, branchCount = branchCount)
@@ -912,6 +1225,30 @@ class AppSemanticAnalyzer @Inject constructor() {
                 methodName = methodName,
             )
         }
+        performanceTrace?.count("instructions_visited_final", instructionsVisited.toLong())
+        performanceTrace?.count("reference_instructions_final", referenceInstructionCount.toLong())
+        performanceTrace?.count("invoke_instructions_final", invokeInstructionCount.toLong())
+        performanceTrace?.count("handle_invoke_calls", handleInvokeCount.toLong())
+        performanceTrace?.count("handle_invoke_nanos_final", handleInvokeNanos)
+        performanceTrace?.count("instruction_evidence_builds_final", instructionEvidenceBuilder.buildCount.toLong())
+        performanceTrace?.count("register_list_calls_final", registerListCallCount.toLong())
+        performanceTrace?.count("method_signature_with_arguments_calls_final", methodSignatureWithArgumentsCallCount.toLong())
+        performanceTrace?.count("method_signature_with_arguments_nanos_final", methodSignatureWithArgumentsNanos)
+        performanceTrace?.count("method_call_candidates_final", methodCallCandidates.toLong())
+        performanceTrace?.count("method_calls_discarded_final", methodCallsDiscarded.toLong())
+        performanceTrace?.count("method_calls_discarded_platform_final", methodCallsDiscardedPlatform.toLong())
+        performanceTrace?.count("method_calls_discarded_blank_target_final", methodCallsDiscardedBlankTarget.toLong())
+        performanceTrace?.count("opcode_key_calls_final", opcodeKeyCallCount.toLong())
+        performanceTrace?.count("register_list_objects_built_final", 0L)
+        performanceTrace?.count("argument_tags_built_final", argumentTagsBuilt.toLong())
+        performanceTrace?.count("argument_strings_built_final", argumentStringsBuilt.toLong())
+        performanceTrace?.count("argument_ints_built_final", argumentIntsBuilt.toLong())
+        performanceTrace?.count("facts_emitted_final", facts.size.toLong())
+        performanceTrace?.count("method_calls_retained_final", methodCalls.size.toLong())
+        performanceTrace?.count("method_call_objects_retained_final", methodCalls.size.toLong())
+        if (facts.isNotEmpty()) {
+            performanceTrace?.count("methods_with_facts")
+        }
 
         return MethodSemanticResult(
             cfgNodes = cfg.nodes,
@@ -919,12 +1256,30 @@ class AppSemanticAnalyzer @Inject constructor() {
             dfgEdges = dfgEdges,
             facts = facts,
             calls = methodCalls,
+            instructionsVisited = instructionsVisited,
+            referenceInstructionCount = referenceInstructionCount,
+            invokeInstructionCount = invokeInstructionCount,
+            handleInvokeCount = handleInvokeCount,
+            handleInvokeNanos = handleInvokeNanos,
+            instructionEvidenceBuildCount = instructionEvidenceBuilder.buildCount,
+            registerListCallCount = registerListCallCount,
+            methodSignatureWithArgumentsCallCount = methodSignatureWithArgumentsCallCount,
+            methodSignatureWithArgumentsNanos = methodSignatureWithArgumentsNanos,
+            methodCallCandidates = methodCallCandidates,
+            methodCallsDiscarded = methodCallsDiscarded,
+            methodCallsDiscardedPlatform = methodCallsDiscardedPlatform,
+            methodCallsDiscardedBlankTarget = methodCallsDiscardedBlankTarget,
+            opcodeKeyCallCount = opcodeKeyCallCount,
+            argumentTagsBuilt = argumentTagsBuilt,
+            argumentStringsBuilt = argumentStringsBuilt,
+            argumentIntsBuilt = argumentIntsBuilt,
+            hasCfg = hasCfg,
         )
     }
 
     private fun scanReference(
         reference: Reference,
-        evidence: String,
+        evidence: InstructionEvidenceBuilder,
         addFact: (SemanticFactKind, String, String) -> Unit,
         tagRegister: (DataTag) -> Unit,
     ) {
@@ -936,10 +1291,18 @@ class AppSemanticAnalyzer @Inject constructor() {
                 scanText(reference.name, evidence, addFact, allowTunnelInterface = false)
                 scanType(reference.type, evidence, addFact)
                 if (isDeviceIdentifierField(reference.definingClass, reference.name)) {
-                    addFact(SemanticFactKind.DEVICE_IDENTIFIER_COLLECTION, "$evidence -> ${reference.definingClass}->${reference.name}", reference.name)
+                    addFact(
+                        SemanticFactKind.DEVICE_IDENTIFIER_COLLECTION,
+                        "${evidence.value()} -> ${reference.definingClass}->${reference.name}",
+                        reference.name,
+                    )
                 }
                 if (reference.definingClass == "Landroid/net/VpnService;" && reference.name == "SERVICE_INTERFACE") {
-                    addFact(SemanticFactKind.VPN_SERVICE_ACTION, "$evidence -> VpnService.SERVICE_INTERFACE", "VpnService.SERVICE_INTERFACE")
+                    addFact(
+                        SemanticFactKind.VPN_SERVICE_ACTION,
+                        "${evidence.value()} -> VpnService.SERVICE_INTERFACE",
+                        "VpnService.SERVICE_INTERFACE",
+                    )
                     tagRegister(DataTag.VPN_SERVICE_ACTION)
                 }
             }
@@ -954,22 +1317,25 @@ class AppSemanticAnalyzer @Inject constructor() {
         packageName: String,
         appClassPrefixes: Set<String>,
         callerScope: AppSemanticRiskScope,
-        argumentRegisters: List<Int>,
+        argumentRegisters: InstructionRegisterBuffer,
         argumentTags: Set<DataTag>,
         argumentStrings: List<String>,
         argumentInts: List<Long>,
-        evidence: String,
+        evidence: InstructionEvidenceBuilder,
         addFact: (SemanticFactKind, String, String) -> Unit,
         tagRegister: (Int, Array<out DataTag>) -> Unit,
+        formatMethodSignatureWithArguments: (MethodReference, List<String>, List<Long>) -> String,
     ): InvokeSemanticResult {
         val className = dexTypeName(method.definingClass)
         val signature = methodSignature(method)
-        val callSignature = methodSignatureWithArguments(
-            reference = method,
-            argumentStrings = argumentStrings,
-            argumentInts = argumentInts,
-        )
-        val callEvidence = "$evidence -> $callSignature"
+        var cachedCallSignature: String? = null
+        fun callSignature(): String {
+            cachedCallSignature?.let { return it }
+            val formatted = formatMethodSignatureWithArguments(method, argumentStrings, argumentInts)
+            cachedCallSignature = formatted
+            return formatted
+        }
+        fun callEvidence(): String = "${evidence.value()} -> ${callSignature()}"
         val name = method.name
         val resultTags = mutableSetOf<DataTag>()
         var dfgEdges = 0
@@ -1015,14 +1381,14 @@ class AppSemanticAnalyzer @Inject constructor() {
             isVpnClientControlCall(className, name) ||
             (isVpnLaunchCall(className, name) && DataTag.VPN_INTENT in argumentTags)
         ) {
-            addFact(SemanticFactKind.VPN_CLIENT_CONTROL_CONTEXT, callEvidence, signature)
+            addFact(SemanticFactKind.VPN_CLIENT_CONTROL_CONTEXT, callEvidence(), signature)
             if (isSplitTunnelVpnBuilderCall(className, name)) {
-                addFact(SemanticFactKind.SPLIT_TUNNEL_APP_SELECTION, callEvidence, signature)
+                addFact(SemanticFactKind.SPLIT_TUNNEL_APP_SELECTION, callEvidence(), signature)
             }
         }
 
         if (className == "java.lang.System" && name == "getProperty" && argumentStrings.any(::isSystemProxyPropertyText)) {
-            addFact(SemanticFactKind.SYSTEM_PROXY_INSPECTION, callEvidence, signature)
+            addFact(SemanticFactKind.SYSTEM_PROXY_INSPECTION, callEvidence(), signature)
             resultTags += DataTag.LOCAL_PROXY_ENDPOINT
             dfgEdges += 1
         }
@@ -1031,12 +1397,12 @@ class AppSemanticAnalyzer @Inject constructor() {
             argumentStrings
                 .mapNotNull { value -> nativeLoadLibraryName(name, value) }
                 .forEach { libraryName ->
-                    addFact(SemanticFactKind.NATIVE_LIBRARY_LOAD, callEvidence, libraryName)
+                    addFact(SemanticFactKind.NATIVE_LIBRARY_LOAD, callEvidence(), libraryName)
                 }
         }
 
         if (isSelfProxyUseCall(className, name) || (argumentStrings.any(::isSelfProxyText) && name != "getProperty")) {
-            addFact(SemanticFactKind.LOCAL_PROXY_SELF_USE_CONTEXT, callEvidence, signature)
+            addFact(SemanticFactKind.LOCAL_PROXY_SELF_USE_CONTEXT, callEvidence(), signature)
         }
 
         if (
@@ -1044,7 +1410,7 @@ class AppSemanticAnalyzer @Inject constructor() {
             isLocalProxyScanText(className) ||
             (hasLocalProxyArgument && name.contains("probe", ignoreCase = true))
         ) {
-            addFact(SemanticFactKind.LOCAL_PROXY_SCAN_CONTEXT, callEvidence, signature)
+            addFact(SemanticFactKind.LOCAL_PROXY_SCAN_CONTEXT, callEvidence(), signature)
         }
 
         if (className == "android.content.Context" && name == "getPackageName") {
@@ -1058,7 +1424,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                 }
                 resultTags += DataTag.SELF_SCOPED_VPN_INTENT
                 dfgEdges += 1
-                addFact(SemanticFactKind.SELF_PACKAGE_SCOPED_VPN_QUERY, callEvidence, signature)
+                addFact(SemanticFactKind.SELF_PACKAGE_SCOPED_VPN_QUERY, callEvidence(), signature)
             }
         }
 
@@ -1068,21 +1434,21 @@ class AppSemanticAnalyzer @Inject constructor() {
                     tagRegister(register, arrayOf(DataTag.VPN_INTENT))
                 }
                 dfgEdges += 1
-                addFact(SemanticFactKind.VPN_SERVICE_INTENT, callEvidence, signature)
+                addFact(SemanticFactKind.VPN_SERVICE_INTENT, callEvidence(), signature)
             }
         }
 
         if (className == "android.content.pm.PackageManager" && name == "queryIntentServices") {
-            addFact(SemanticFactKind.PACKAGE_QUERY_API, callEvidence, signature)
+            addFact(SemanticFactKind.PACKAGE_QUERY_API, callEvidence(), signature)
             if (
                 DataTag.VPN_INTENT in argumentTags ||
                 DataTag.VPN_SERVICE_ACTION in argumentTags ||
                 argumentStrings.any(::isVpnServiceAction)
             ) {
                 if (DataTag.SELF_SCOPED_VPN_INTENT in argumentTags) {
-                    addFact(SemanticFactKind.SELF_PACKAGE_SCOPED_VPN_QUERY, callEvidence, signature)
+                    addFact(SemanticFactKind.SELF_PACKAGE_SCOPED_VPN_QUERY, callEvidence(), signature)
                 } else {
-                    addFact(SemanticFactKind.PACKAGE_QUERY_VPN_SERVICE, callEvidence, signature)
+                    addFact(SemanticFactKind.PACKAGE_QUERY_VPN_SERVICE, callEvidence(), signature)
                     resultTags += DataTag.VPN_QUERY_RESULT
                     dfgEdges += 1
                 }
@@ -1090,28 +1456,28 @@ class AppSemanticAnalyzer @Inject constructor() {
         }
 
         if (className == "android.content.pm.PackageManager" && name in BROAD_PACKAGE_INVENTORY_METHODS) {
-            addFact(SemanticFactKind.BROAD_PACKAGE_INVENTORY, callEvidence, signature)
+            addFact(SemanticFactKind.BROAD_PACKAGE_INVENTORY, callEvidence(), signature)
             resultTags += DataTag.BROAD_PACKAGE_RESULT
             dfgEdges += 1
         }
 
         if (className == "android.content.pm.PackageManager" && name in PACKAGE_NAME_QUERY_METHODS) {
-            addFact(SemanticFactKind.PACKAGE_QUERY_API, callEvidence, signature)
+            addFact(SemanticFactKind.PACKAGE_QUERY_API, callEvidence(), signature)
             val externalPackageNames = argumentStrings.filter { isExternalPackageNameText(it, packageName) }
             if (externalPackageNames.isNotEmpty()) {
                 addFact(
                     SemanticFactKind.SINGLE_PACKAGE_INTEGRATION_CHECK,
-                    callEvidence,
+                    callEvidence(),
                     externalPackageNames.joinToString("|"),
                 )
             }
             if (externalPackageNames.any(::isSensitivePackageNameText)) {
-                addFact(SemanticFactKind.PACKAGE_NAME_LIST_CHECK, callEvidence, signature)
+                addFact(SemanticFactKind.PACKAGE_NAME_LIST_CHECK, callEvidence(), signature)
                 resultTags += DataTag.PACKAGE_INVENTORY_VALUE
                 dfgEdges += 1
             }
             if (DataTag.KNOWN_VPN_PACKAGE in argumentTags || argumentStrings.any { it in AppRiskRules.vpnClientPackageNames }) {
-                addFact(SemanticFactKind.KNOWN_VPN_PACKAGE_CHECK, callEvidence, signature)
+                addFact(SemanticFactKind.KNOWN_VPN_PACKAGE_CHECK, callEvidence(), signature)
                 resultTags += DataTag.VPN_PACKAGE_VALUE
                 dfgEdges += 1
             }
@@ -1132,22 +1498,22 @@ class AppSemanticAnalyzer @Inject constructor() {
         if (hasVpnPackageInventoryArgument) {
             when {
                 name in RESULT_COLLECTION_METHODS -> {
-                    addFact(SemanticFactKind.VPN_RESULT_COLLECTION, callEvidence, signature)
+                    addFact(SemanticFactKind.VPN_RESULT_COLLECTION, callEvidence(), signature)
                     dfgEdges += 1
                     resultTags.addAll(argumentTags.filter { it.isVpnOrProxyData() })
                 }
                 isSerializationSink -> {
-                    addFact(SemanticFactKind.VPN_RESULT_COLLECTION, callEvidence, signature)
+                    addFact(SemanticFactKind.VPN_RESULT_COLLECTION, callEvidence(), signature)
                     if (hasVpnTelemetryKeyArgument || hasVpnDataArgument) {
-                        addFact(SemanticFactKind.TELEMETRY_PREPARATION, callEvidence, signature)
+                        addFact(SemanticFactKind.TELEMETRY_PREPARATION, callEvidence(), signature)
                     }
-                    addFact(SemanticFactKind.VPN_DATA_SERIALIZATION_FLOW, callEvidence, signature)
+                    addFact(SemanticFactKind.VPN_DATA_SERIALIZATION_FLOW, callEvidence(), signature)
                     resultTags += DataTag.VPN_TELEMETRY_PAYLOAD
                     dfgEdges += 2
                 }
                 isNetworkTransportCall -> {
-                    addFact(SemanticFactKind.TELEMETRY_OR_NETWORK_SINK, callEvidence, signature)
-                    addFact(SemanticFactKind.VPN_DATA_NETWORK_FLOW, callEvidence, signature)
+                    addFact(SemanticFactKind.TELEMETRY_OR_NETWORK_SINK, callEvidence(), signature)
+                    addFact(SemanticFactKind.VPN_DATA_NETWORK_FLOW, callEvidence(), signature)
                     dfgEdges += 2
                 }
             }
@@ -1157,23 +1523,23 @@ class AppSemanticAnalyzer @Inject constructor() {
             isSerializationSink &&
             (hasVpnTelemetryKeyArgument || hasVpnDataArgument)
         ) {
-            addFact(SemanticFactKind.TELEMETRY_PREPARATION, callEvidence, signature)
-            addFact(SemanticFactKind.VPN_DATA_SERIALIZATION_FLOW, callEvidence, signature)
+            addFact(SemanticFactKind.TELEMETRY_PREPARATION, callEvidence(), signature)
+            addFact(SemanticFactKind.VPN_DATA_SERIALIZATION_FLOW, callEvidence(), signature)
             resultTags += DataTag.VPN_TELEMETRY_PAYLOAD
             dfgEdges += 1
         }
 
         if (isHeaderTelemetrySink) {
-            addFact(SemanticFactKind.TELEMETRY_PREPARATION, callEvidence, signature)
-            addFact(SemanticFactKind.VPN_DATA_HTTP_HEADER_FLOW, callEvidence, signature)
-            addFact(SemanticFactKind.TELEMETRY_OR_NETWORK_SINK, callEvidence, signature)
-            addFact(SemanticFactKind.VPN_DATA_NETWORK_FLOW, callEvidence, signature)
+            addFact(SemanticFactKind.TELEMETRY_PREPARATION, callEvidence(), signature)
+            addFact(SemanticFactKind.VPN_DATA_HTTP_HEADER_FLOW, callEvidence(), signature)
+            addFact(SemanticFactKind.TELEMETRY_OR_NETWORK_SINK, callEvidence(), signature)
+            addFact(SemanticFactKind.VPN_DATA_NETWORK_FLOW, callEvidence(), signature)
             resultTags += DataTag.VPN_TELEMETRY_PAYLOAD
             dfgEdges += 3
         }
 
         if (isSdkCall && hasVpnDataArgument) {
-            addFact(SemanticFactKind.VPN_DATA_SDK_HANDOFF, callEvidence, signature)
+            addFact(SemanticFactKind.VPN_DATA_SDK_HANDOFF, callEvidence(), signature)
             dfgEdges += 2
         }
 
@@ -1182,15 +1548,15 @@ class AppSemanticAnalyzer @Inject constructor() {
         ) {
             when {
                 isNetworkTransportCall -> {
-                    addFact(SemanticFactKind.TELEMETRY_OR_NETWORK_SINK, callEvidence, signature)
-                    addFact(SemanticFactKind.VPN_DATA_NETWORK_FLOW, callEvidence, signature)
+                    addFact(SemanticFactKind.TELEMETRY_OR_NETWORK_SINK, callEvidence(), signature)
+                    addFact(SemanticFactKind.VPN_DATA_NETWORK_FLOW, callEvidence(), signature)
                     dfgEdges += 2
                 }
                 isSdkCall || isTelemetrySink -> {
-                    addFact(SemanticFactKind.TELEMETRY_OR_NETWORK_SINK, callEvidence, signature)
+                    addFact(SemanticFactKind.TELEMETRY_OR_NETWORK_SINK, callEvidence(), signature)
                     dfgEdges += 1
                     if (isSdkCall) {
-                        addFact(SemanticFactKind.VPN_DATA_SDK_HANDOFF, callEvidence, signature)
+                        addFact(SemanticFactKind.VPN_DATA_SDK_HANDOFF, callEvidence(), signature)
                         dfgEdges += 1
                     }
                 }
@@ -1198,11 +1564,11 @@ class AppSemanticAnalyzer @Inject constructor() {
         }
 
         if (isNetworkTransportCall) {
-            addFact(SemanticFactKind.NETWORK_LIBRARY_CALL, callEvidence, signature)
+            addFact(SemanticFactKind.NETWORK_LIBRARY_CALL, callEvidence(), signature)
         }
         if (isTelemetrySink && name != "<init>") {
             if (hasVpnDataArgument || hasTelemetryPayloadArgument || hasVpnTelemetryKeyArgument) {
-                addFact(SemanticFactKind.TELEMETRY_OR_NETWORK_SINK, callEvidence, signature)
+                addFact(SemanticFactKind.TELEMETRY_OR_NETWORK_SINK, callEvidence(), signature)
                 dfgEdges += 1
             }
         }
@@ -1215,7 +1581,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                     argumentStrings.any { it == "TRANSPORT_VPN" || it == "NetworkCapabilities.TRANSPORT_VPN" }
                 )
         ) {
-            addFact(SemanticFactKind.NETWORK_CAPABILITIES_VPN_CHECK, callEvidence, signature)
+            addFact(SemanticFactKind.NETWORK_CAPABILITIES_VPN_CHECK, callEvidence(), signature)
             resultTags += DataTag.VPN_STATE_VALUE
             dfgEdges += 1
         }
@@ -1227,45 +1593,45 @@ class AppSemanticAnalyzer @Inject constructor() {
                     argumentStrings.any { it == "NET_CAPABILITY_NOT_VPN" || it == "NetworkCapabilities.NET_CAPABILITY_NOT_VPN" }
                 )
         ) {
-            addFact(SemanticFactKind.NETWORK_CAPABILITIES_VPN_CHECK, callEvidence, signature)
+            addFact(SemanticFactKind.NETWORK_CAPABILITIES_VPN_CHECK, callEvidence(), signature)
             resultTags += DataTag.VPN_STATE_VALUE
             dfgEdges += 1
         }
         if (className == "java.net.NetworkInterface" && name == "getNetworkInterfaces") {
-            addFact(SemanticFactKind.TUNNEL_INTERFACE_API, callEvidence, signature)
+            addFact(SemanticFactKind.TUNNEL_INTERFACE_API, callEvidence(), signature)
         }
         if (className == "java.net.NetworkInterface" && name == "getMTU") {
-            addFact(SemanticFactKind.MTU_PROBE, callEvidence, signature)
+            addFact(SemanticFactKind.MTU_PROBE, callEvidence(), signature)
         }
         if (className == "android.net.LinkProperties" && name == "getDnsServers") {
-            addFact(SemanticFactKind.DNS_SERVER_INSPECTION, callEvidence, signature)
+            addFact(SemanticFactKind.DNS_SERVER_INSPECTION, callEvidence(), signature)
         }
         if (
             (className == "android.net.LinkProperties" && name in ROUTE_INSPECTION_METHODS) ||
             (className == "android.net.ConnectivityManager" && name == "getLinkProperties")
         ) {
-            addFact(SemanticFactKind.ROUTE_TABLE_INSPECTION, callEvidence, signature)
+            addFact(SemanticFactKind.ROUTE_TABLE_INSPECTION, callEvidence(), signature)
         }
         if (isSystemProxyInspectionCall(className, name)) {
-            addFact(SemanticFactKind.SYSTEM_PROXY_INSPECTION, callEvidence, signature)
+            addFact(SemanticFactKind.SYSTEM_PROXY_INSPECTION, callEvidence(), signature)
             if (isSystemProxyValueCall(className, name)) {
                 resultTags += DataTag.LOCAL_PROXY_ENDPOINT
                 dfgEdges += 1
             }
         }
         if (className == "android.net.ConnectivityManager" && name == "getAllNetworks") {
-            addFact(SemanticFactKind.UNDERLYING_NETWORK_ENUMERATION, callEvidence, signature)
+            addFact(SemanticFactKind.UNDERLYING_NETWORK_ENUMERATION, callEvidence(), signature)
         }
         if (isDeviceIdentifierCollectionCall(className, name)) {
-            addFact(SemanticFactKind.DEVICE_IDENTIFIER_COLLECTION, callEvidence, signature)
+            addFact(SemanticFactKind.DEVICE_IDENTIFIER_COLLECTION, callEvidence(), signature)
             resultTags += DataTag.DEVICE_FINGERPRINT_VALUE
         }
         if (isNetworkFingerprintCollectionCall(className, name)) {
-            addFact(SemanticFactKind.NETWORK_FINGERPRINT_COLLECTION, callEvidence, signature)
+            addFact(SemanticFactKind.NETWORK_FINGERPRINT_COLLECTION, callEvidence(), signature)
             resultTags += DataTag.DEVICE_FINGERPRINT_VALUE
         }
         if (isUsageStatsCollectionCall(className, name)) {
-            addFact(SemanticFactKind.USAGE_STATS_COLLECTION, callEvidence, signature)
+            addFact(SemanticFactKind.USAGE_STATS_COLLECTION, callEvidence(), signature)
             resultTags += DataTag.DEVICE_FINGERPRINT_VALUE
         }
         if (
@@ -1273,18 +1639,18 @@ class AppSemanticAnalyzer @Inject constructor() {
             (className == "android.net.Network" && name in NETWORK_BINDING_METHODS) ||
             (className == "android.system.Os" && name.startsWith("setsockopt"))
         ) {
-            addFact(SemanticFactKind.NETWORK_BYPASS_BINDING, callEvidence, signature)
+            addFact(SemanticFactKind.NETWORK_BYPASS_BINDING, callEvidence(), signature)
         }
 
         if (name == "exec" && argumentStrings.any { it.contains("dumpsys") || it.contains("vpn_management") }) {
-            addFact(SemanticFactKind.ACTIVE_VPN_DUMPSYS, callEvidence, signature)
+            addFact(SemanticFactKind.ACTIVE_VPN_DUMPSYS, callEvidence(), signature)
         }
 
         if (
             method.isSocketConnectCall() &&
             hasLocalProxyArgument
         ) {
-            addFact(SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE, callEvidence, signature)
+            addFact(SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE, callEvidence(), signature)
             dfgEdges += 1
         }
 
@@ -1380,10 +1746,10 @@ class AppSemanticAnalyzer @Inject constructor() {
 
     private fun applyConstructorFieldSummary(
         method: MethodReference,
-        argumentRegisters: List<Int>,
+        argumentRegisters: InstructionRegisterBuffer,
         registerTags: Map<Int, Collection<DataTag>>,
         summaries: DexSemanticSummaries,
-        evidence: String,
+        evidence: InstructionEvidenceBuilder,
         addFact: (SemanticFactKind, String, String) -> Unit,
         tagRegister: (Int, Array<out DataTag>) -> Unit,
     ): Int? {
@@ -1392,7 +1758,7 @@ class AppSemanticAnalyzer @Inject constructor() {
         applyConstructorFieldSummaryToRegisters(
             targetKey = methodKey(method),
             argumentRegisters = argumentRegisters,
-            argumentTagsByIndex = argumentRegisters.map { register -> registerTags[register].orEmpty().toSet() },
+            argumentTagsByIndex = argumentRegisters.mapToList { register -> registerTags[register].orEmpty().toSet() },
             constructorParameterFields = summaries.constructorParameterFields,
             tagRegister = { register, tags -> tagRegister(register, tags.toTypedArray()) },
             addFieldTags = { field, tags ->
@@ -1400,7 +1766,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                     dfgEdges += tags.size
                     addFact(
                         SemanticFactKind.VPN_DATA_CARRIER_FIELD,
-                        "$evidence -> constructor stores VPN/proxy data into ${field.displayName()}",
+                        "${evidence.value()} -> constructor stores VPN/proxy data into ${field.displayName()}",
                         field.displayName(),
                     )
                 }
@@ -1411,7 +1777,7 @@ class AppSemanticAnalyzer @Inject constructor() {
 
     private fun applyConstructorFieldSummaryToRegisters(
         targetKey: MethodKey,
-        argumentRegisters: List<Int>,
+        argumentRegisters: InstructionRegisterBuffer,
         argumentTagsByIndex: List<Set<DataTag>>,
         constructorParameterFields: Map<MethodKey, Map<Int, Set<FieldKey>>>,
         tagRegister: (Int, Set<DataTag>) -> Unit,
@@ -1460,41 +1826,59 @@ class AppSemanticAnalyzer @Inject constructor() {
         addFact: (SemanticFactKind, String, String) -> Unit,
         allowTunnelInterface: Boolean = true,
     ) {
+        scanText(value, { evidence }, addFact, allowTunnelInterface)
+    }
+
+    private fun scanText(
+        value: String?,
+        evidence: InstructionEvidenceBuilder,
+        addFact: (SemanticFactKind, String, String) -> Unit,
+        allowTunnelInterface: Boolean = true,
+    ) {
+        scanText(value, { evidence.value() }, addFact, allowTunnelInterface)
+    }
+
+    private inline fun scanText(
+        value: String?,
+        evidence: () -> String,
+        addFact: (SemanticFactKind, String, String) -> Unit,
+        allowTunnelInterface: Boolean = true,
+    ) {
         if (value.isNullOrBlank()) return
         when {
-            isVpnServiceAction(value) -> addFact(SemanticFactKind.VPN_SERVICE_ACTION, "$evidence -> $value", value)
-            value in AppRiskRules.vpnClientPackageNames -> addFact(SemanticFactKind.KNOWN_VPN_PACKAGE_REFERENCE, "$evidence -> $value", value)
-            isDeviceIdentifierText(value) -> addFact(SemanticFactKind.DEVICE_IDENTIFIER_COLLECTION, "$evidence -> $value", value)
-            isNetworkFingerprintText(value) -> addFact(SemanticFactKind.NETWORK_FINGERPRINT_COLLECTION, "$evidence -> $value", value)
-            isPublicIpEndpoint(value) -> addFact(SemanticFactKind.PUBLIC_IP_PROBE, "$evidence -> $value", value)
-            isVpnTelemetryText(value) -> addFact(SemanticFactKind.VPN_TELEMETRY_LABEL, "$evidence -> $value", value)
-            isSplitTunnelText(value) -> addFact(SemanticFactKind.SPLIT_TUNNEL_APP_SELECTION, "$evidence -> $value", value)
-            isLocalProxyScanText(value) -> addFact(SemanticFactKind.LOCAL_PROXY_SCAN_CONTEXT, "$evidence -> $value", value)
-            isSelfProxyText(value) -> addFact(SemanticFactKind.LOCAL_PROXY_SELF_USE_CONTEXT, "$evidence -> $value", value)
+            isVpnServiceAction(value) -> addFact(SemanticFactKind.VPN_SERVICE_ACTION, "${evidence()} -> $value", value)
+            value in AppRiskRules.vpnClientPackageNames -> addFact(SemanticFactKind.KNOWN_VPN_PACKAGE_REFERENCE, "${evidence()} -> $value", value)
+            isDeviceIdentifierText(value) -> addFact(SemanticFactKind.DEVICE_IDENTIFIER_COLLECTION, "${evidence()} -> $value", value)
+            isNetworkFingerprintText(value) -> addFact(SemanticFactKind.NETWORK_FINGERPRINT_COLLECTION, "${evidence()} -> $value", value)
+            isPublicIpEndpoint(value) -> addFact(SemanticFactKind.PUBLIC_IP_PROBE, "${evidence()} -> $value", value)
+            isVpnTelemetryText(value) -> addFact(SemanticFactKind.VPN_TELEMETRY_LABEL, "${evidence()} -> $value", value)
+            isSplitTunnelText(value) -> addFact(SemanticFactKind.SPLIT_TUNNEL_APP_SELECTION, "${evidence()} -> $value", value)
+            isLocalProxyScanText(value) -> addFact(SemanticFactKind.LOCAL_PROXY_SCAN_CONTEXT, "${evidence()} -> $value", value)
+            isSelfProxyText(value) -> addFact(SemanticFactKind.LOCAL_PROXY_SELF_USE_CONTEXT, "${evidence()} -> $value", value)
             isSystemProxyPropertyText(value) -> {
-                addFact(SemanticFactKind.SYSTEM_PROXY_INSPECTION, "$evidence -> $value", value)
+                addFact(SemanticFactKind.SYSTEM_PROXY_INSPECTION, "${evidence()} -> $value", value)
             }
             isSocksOrLocalProxyText(value) -> {
-                addFact(SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE, "$evidence -> $value", value)
+                addFact(SemanticFactKind.SOCKS_OR_LOCAL_PROXY_PROBE, "${evidence()} -> $value", value)
             }
             isProcRouteText(value) -> {
-                addFact(SemanticFactKind.ROUTE_TABLE_INSPECTION, "$evidence -> $value", value)
+                addFact(SemanticFactKind.ROUTE_TABLE_INSPECTION, "${evidence()} -> $value", value)
             }
             value.startsWith("/proc/net/") || value.startsWith("/proc/self/net/") -> {
-                addFact(SemanticFactKind.PROC_SOCKET_TABLE, "$evidence -> $value", value)
+                addFact(SemanticFactKind.PROC_SOCKET_TABLE, "${evidence()} -> $value", value)
             }
             value == "SO_BINDTODEVICE" || value.contains("SO_BINDTODEVICE") -> {
-                addFact(SemanticFactKind.NETWORK_BYPASS_BINDING, "$evidence -> $value", value)
+                addFact(SemanticFactKind.NETWORK_BYPASS_BINDING, "${evidence()} -> $value", value)
             }
             value == "TRANSPORT_VPN" ||
                 value == "NetworkCapabilities.TRANSPORT_VPN" ||
                 value == "NET_CAPABILITY_NOT_VPN" ||
                 value == "IS_VPN" ||
                 value == "VpnTransportInfo" -> {
-                addFact(SemanticFactKind.NETWORK_CAPABILITIES_VPN_CHECK, "$evidence -> $value", value)
+                addFact(SemanticFactKind.NETWORK_CAPABILITIES_VPN_CHECK, "${evidence()} -> $value", value)
             }
             allowTunnelInterface && isTunnelInterfaceText(value) -> {
-                addFact(SemanticFactKind.TUNNEL_INTERFACE_PROBE, "$evidence -> $value", value)
+                addFact(SemanticFactKind.TUNNEL_INTERFACE_PROBE, "${evidence()} -> $value", value)
             }
         }
     }
@@ -1502,6 +1886,22 @@ class AppSemanticAnalyzer @Inject constructor() {
     private fun scanType(
         value: String?,
         evidence: String,
+        addFact: (SemanticFactKind, String, String) -> Unit,
+    ) {
+        scanType(value, { evidence }, addFact)
+    }
+
+    private fun scanType(
+        value: String?,
+        evidence: InstructionEvidenceBuilder,
+        addFact: (SemanticFactKind, String, String) -> Unit,
+    ) {
+        scanType(value, { evidence.value() }, addFact)
+    }
+
+    private inline fun scanType(
+        value: String?,
+        evidence: () -> String,
         addFact: (SemanticFactKind, String, String) -> Unit,
     ) {
         val typeName = dexTypeName(value)
@@ -1521,17 +1921,23 @@ class AppSemanticAnalyzer @Inject constructor() {
     private fun buildSignals(
         summary: MutableSemanticSummary,
         trustedVpnClient: Boolean,
+        performanceTrace: AppSemanticAnalyzerPerformanceTrace?,
     ): List<AppSemanticSignal> {
         val signals = mutableListOf<AppSemanticSignal>()
         val facts = summary.facts
+        performanceTrace?.count("facts_count", facts.size.toLong())
+        performanceTrace?.count("method_calls_count", summary.methodCalls.size.toLong())
+        performanceTrace?.count("native_libraries_count", summary.nativeLibraries.size.toLong())
 
-        facts
+        val methodFactGroups = facts
             .filter {
                 it.className.isNotBlank() &&
                     it.methodName.isNotBlank() &&
                     it.scope != AppSemanticRiskScope.NATIVE_CODE
             }
             .groupBy { MethodGroup(it.scope, it.source, it.className, it.methodName) }
+        performanceTrace?.count("method_fact_groups_count", methodFactGroups.size.toLong())
+        methodFactGroups
             .forEach { (group, groupFacts) ->
                 signals += buildGroupSignals(
                     facts = groupFacts,
@@ -1541,9 +1947,11 @@ class AppSemanticAnalyzer @Inject constructor() {
                 )
             }
 
-        facts
+        val classFactGroups = facts
             .filter { it.className.isNotBlank() && it.scope != AppSemanticRiskScope.NATIVE_CODE }
             .groupBy { ClassGroup(it.scope, it.source, it.className) }
+        performanceTrace?.count("class_fact_groups_count", classFactGroups.size.toLong())
+        classFactGroups
             .forEach { (group, groupFacts) ->
                 signals += buildGroupSignals(
                     facts = groupFacts,
@@ -1553,12 +1961,14 @@ class AppSemanticAnalyzer @Inject constructor() {
                 )
             }
 
-        signals += buildCallGraphSignals(summary, trustedVpnClient)
+        signals += buildCallGraphSignals(summary, trustedVpnClient, performanceTrace)
         signals += buildMethodologyPatternSignals(summary, trustedVpnClient)
 
-        facts
+        val scopeFactGroups = facts
             .filter { it.scope == AppSemanticRiskScope.MANIFEST || it.scope == AppSemanticRiskScope.NATIVE_CODE }
             .groupBy { ScopeGroup(it.scope, it.source) }
+        performanceTrace?.count("scope_fact_groups_count", scopeFactGroups.size.toLong())
+        scopeFactGroups
             .forEach { (group, groupFacts) ->
                 signals += buildGroupSignals(
                     facts = groupFacts,
@@ -1593,15 +2003,18 @@ class AppSemanticAnalyzer @Inject constructor() {
     private fun buildCallGraphSignals(
         summary: MutableSemanticSummary,
         trustedVpnClient: Boolean,
+        performanceTrace: AppSemanticAnalyzerPerformanceTrace?,
     ): List<AppSemanticSignal> {
         return buildScopedCallGraphSignals(
             summary = summary,
             trustedVpnClient = trustedVpnClient,
             scope = AppSemanticRiskScope.APP_CODE,
+            performanceTrace = performanceTrace,
         ) + buildScopedCallGraphSignals(
             summary = summary,
             trustedVpnClient = trustedVpnClient,
             scope = AppSemanticRiskScope.SDK_CODE,
+            performanceTrace = performanceTrace,
         )
     }
 
@@ -1609,6 +2022,7 @@ class AppSemanticAnalyzer @Inject constructor() {
         summary: MutableSemanticSummary,
         trustedVpnClient: Boolean,
         scope: AppSemanticRiskScope,
+        performanceTrace: AppSemanticAnalyzerPerformanceTrace?,
     ): List<AppSemanticSignal> {
         val scopedSource = evidenceSourceForScope(scope)
         val factsByMethod = summary.facts
@@ -1625,6 +2039,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                     methodName = fact.methodName,
                 )
             }
+        performanceTrace?.count("call_graph_${scope.name.lowercase()}_fact_methods", factsByMethod.size.toLong())
         if (factsByMethod.isEmpty()) return emptyList()
 
         val scopedCalls = summary.methodCalls
@@ -1644,6 +2059,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                     methodName = call.callerMethod,
                 )
             }
+        performanceTrace?.count("call_graph_${scope.name.lowercase()}_caller_groups", scopedCalls.size.toLong())
         if (scopedCalls.isEmpty()) return emptyList()
 
         val signals = mutableListOf<AppSemanticSignal>()
@@ -1709,8 +2125,10 @@ class AppSemanticAnalyzer @Inject constructor() {
             source = scopedSource,
             factsByMethod = factsByMethod,
             addSignalsFor = ::addSignalsFor,
+            performanceTrace = performanceTrace,
         )
 
+        performanceTrace?.count("call_graph_${scope.name.lowercase()}_signals_emitted", signals.size.toLong())
         return signals
     }
 
@@ -1733,6 +2151,7 @@ class AppSemanticAnalyzer @Inject constructor() {
         source: AppSemanticEvidenceSource,
         factsByMethod: Map<MethodGroup, List<SemanticFact>>,
         addSignalsFor: (Set<MethodGroup>) -> Unit,
+        performanceTrace: AppSemanticAnalyzerPerformanceTrace?,
     ) {
         val targetsByCaller = appCalls.mapValues { (_, calls) ->
             calls
@@ -1754,6 +2173,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                 }
             }
         }
+        performanceTrace?.count("call_graph_${scope.name.lowercase()}_candidate_roots", candidateRoots.size.toLong())
         var exploredEdges = 0
 
         fun traverse(
@@ -1781,6 +2201,7 @@ class AppSemanticAnalyzer @Inject constructor() {
         candidateRoots
             .take(MAX_CALL_GRAPH_CHAIN_ROOTS)
             .forEach { root -> traverse(root, listOf(root), depth = 0) }
+        performanceTrace?.count("call_graph_${scope.name.lowercase()}_explored_edges", exploredEdges.toLong())
     }
 
     private fun buildMethodologyPatternSignals(
@@ -3499,13 +3920,11 @@ class AppSemanticAnalyzer @Inject constructor() {
             !opcodeName.startsWith("goto")
     }
 
-    private fun isConstStringInstruction(instruction: Instruction): Boolean {
-        val opcodeName = opcodeKey(instruction)
+    private fun isConstStringOpcode(opcodeName: String): Boolean {
         return opcodeName == "const-string" || opcodeName == "const-string-jumbo"
     }
 
-    private fun isConstNumberInstruction(instruction: Instruction): Boolean {
-        val opcodeName = opcodeKey(instruction)
+    private fun isConstNumberOpcode(opcodeName: String): Boolean {
         return opcodeName == "const" ||
             opcodeName == "const/4" ||
             opcodeName == "const/16" ||
@@ -3515,11 +3934,13 @@ class AppSemanticAnalyzer @Inject constructor() {
             opcodeName == "const-high16"
     }
 
-    private fun definedRegister(instruction: Instruction): Int? {
-        val opcodeName = opcodeKey(instruction)
+    private fun definedRegister(
+        instruction: Instruction,
+        opcodeName: String,
+    ): Int? {
         if (
-            isConstStringInstruction(instruction) ||
-            isConstNumberInstruction(instruction) ||
+            isConstStringOpcode(opcodeName) ||
+            isConstNumberOpcode(opcodeName) ||
             opcodeName.startsWith("move-result")
         ) {
             return null
@@ -3533,32 +3954,27 @@ class AppSemanticAnalyzer @Inject constructor() {
         }
     }
 
-    private fun movedRegisterPair(instruction: Instruction): Pair<Int, Int>? {
-        val opcodeName = opcodeKey(instruction)
+    private fun movedRegisterPair(
+        instruction: Instruction,
+        opcodeName: String,
+    ): Pair<Int, Int>? {
         if (!opcodeName.startsWith("move") || opcodeName.startsWith("move-result")) return null
         val twoRegisterInstruction = instruction as? TwoRegisterInstruction ?: return null
         return twoRegisterInstruction.registerA to twoRegisterInstruction.registerB
     }
 
     private fun opcodeKey(instruction: Instruction): String {
-        return instruction.opcode.name.lowercase().replace('_', '-')
+        return OPCODE_KEY_CACHE[instruction.opcode] ?: instruction.opcode.name.lowercase().replace('_', '-')
     }
 
-    private fun Instruction.registerList(): List<Int> {
-        return when (this) {
-            is FiveRegisterInstruction -> listOf(
-                registerC,
-                registerD,
-                registerE,
-                registerF,
-                registerG,
-            ).take(registerCount)
-            is RegisterRangeInstruction -> (startRegister until startRegister + registerCount).toList()
-            is ThreeRegisterInstruction -> listOf(registerA, registerB, registerC)
-            is TwoRegisterInstruction -> listOf(registerA, registerB)
-            is OneRegisterInstruction -> listOf(registerA)
-            is VariableRegisterInstruction -> emptyList()
-            else -> emptyList()
+    private fun firstRegister(instruction: Instruction): Int? {
+        return when (instruction) {
+            is FiveRegisterInstruction -> if (instruction.registerCount > 0) instruction.registerC else null
+            is RegisterRangeInstruction -> if (instruction.registerCount > 0) instruction.startRegister else null
+            is ThreeRegisterInstruction -> instruction.registerA
+            is TwoRegisterInstruction -> instruction.registerA
+            is OneRegisterInstruction -> instruction.registerA
+            else -> null
         }
     }
 
@@ -4363,13 +4779,252 @@ class AppSemanticAnalyzer @Inject constructor() {
         }
     }
 
+    private fun <T> AppSemanticAnalyzerPerformanceTrace?.measureOrRun(
+        stage: String,
+        block: () -> T,
+    ): T {
+        return this?.measure(stage, block) ?: block()
+    }
+
+    private fun elapsedMillis(startedAt: Long): Long {
+        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
+    }
+
+    private data class MutableDexEntryMetrics(
+        val entryName: String,
+        var durationMillis: Long = 0L,
+        var dexReadMillis: Long = 0L,
+        var summaryMillis: Long = 0L,
+        var finalAnalysisMillis: Long = 0L,
+        var classCount: Long = 0L,
+        var methodCountTotal: Long = 0L,
+        var methodCountWithImplementation: Long = 0L,
+        var summaryMethodsVisited: Long = 0L,
+        var summaryInstructionsVisited: Long = 0L,
+        var summaryIterationsExecuted: Long = 0L,
+        var summaryIterationsChanged: Long = 0L,
+        var summaryIterationsNoChange: Long = 0L,
+        var finalClassesVisited: Long = 0L,
+        var finalClassesSkippedSdkInfra: Long = 0L,
+        var finalMethodsAnalyzed: Long = 0L,
+        var finalMethodsSkippedSdkInfra: Long = 0L,
+        var instructionsVisitedFinal: Long = 0L,
+        var invokeInstructionsFinal: Long = 0L,
+        var handleInvokeCalls: Long = 0L,
+        var handleInvokeNanosFinal: Long = 0L,
+        var instructionEvidenceBuildsFinal: Long = 0L,
+        var registerListCallsFinal: Long = 0L,
+        var methodSignatureWithArgumentsCallsFinal: Long = 0L,
+        var methodSignatureWithArgumentsNanosFinal: Long = 0L,
+        var methodCallCandidatesFinal: Long = 0L,
+        var methodCallsDiscardedFinal: Long = 0L,
+        var methodCallsDiscardedPlatformFinal: Long = 0L,
+        var methodCallsDiscardedBlankTargetFinal: Long = 0L,
+        var methodsWithCfg: Long = 0L,
+        var factsEmittedFinal: Long = 0L,
+        var methodCallsRetainedFinal: Long = 0L,
+    ) {
+        fun toTraceMetrics(): AppSemanticAnalyzerDexEntryMetrics {
+            return AppSemanticAnalyzerDexEntryMetrics(
+                entryName = entryName,
+                durationMillis = durationMillis,
+                dexReadMillis = dexReadMillis,
+                summaryMillis = summaryMillis,
+                finalAnalysisMillis = finalAnalysisMillis,
+                classCount = classCount,
+                methodCountTotal = methodCountTotal,
+                methodCountWithImplementation = methodCountWithImplementation,
+                summaryMethodsVisited = summaryMethodsVisited,
+                summaryInstructionsVisited = summaryInstructionsVisited,
+                summaryIterationsExecuted = summaryIterationsExecuted,
+                summaryIterationsChanged = summaryIterationsChanged,
+                summaryIterationsNoChange = summaryIterationsNoChange,
+                finalClassesVisited = finalClassesVisited,
+                finalClassesSkippedSdkInfra = finalClassesSkippedSdkInfra,
+                finalMethodsAnalyzed = finalMethodsAnalyzed,
+                finalMethodsSkippedSdkInfra = finalMethodsSkippedSdkInfra,
+                instructionsVisitedFinal = instructionsVisitedFinal,
+                invokeInstructionsFinal = invokeInstructionsFinal,
+                handleInvokeCalls = handleInvokeCalls,
+                handleInvokeNanosFinal = handleInvokeNanosFinal,
+                instructionEvidenceBuildsFinal = instructionEvidenceBuildsFinal,
+                registerListCallsFinal = registerListCallsFinal,
+                methodSignatureWithArgumentsCallsFinal = methodSignatureWithArgumentsCallsFinal,
+                methodSignatureWithArgumentsNanosFinal = methodSignatureWithArgumentsNanosFinal,
+                methodCallCandidatesFinal = methodCallCandidatesFinal,
+                methodCallsDiscardedFinal = methodCallsDiscardedFinal,
+                methodCallsDiscardedPlatformFinal = methodCallsDiscardedPlatformFinal,
+                methodCallsDiscardedBlankTargetFinal = methodCallsDiscardedBlankTargetFinal,
+                methodsWithCfg = methodsWithCfg,
+                factsEmittedFinal = factsEmittedFinal,
+                methodCallsRetainedFinal = methodCallsRetainedFinal,
+            )
+        }
+    }
+
     private data class MethodSemanticResult(
         val cfgNodes: Int,
         val cfgEdges: Int,
         val dfgEdges: Int,
         val facts: List<SemanticFact>,
         val calls: List<MethodCall>,
+        val instructionsVisited: Int,
+        val referenceInstructionCount: Int,
+        val invokeInstructionCount: Int,
+        val handleInvokeCount: Int,
+        val handleInvokeNanos: Long,
+        val instructionEvidenceBuildCount: Int,
+        val registerListCallCount: Int,
+        val methodSignatureWithArgumentsCallCount: Int,
+        val methodSignatureWithArgumentsNanos: Long,
+        val methodCallCandidates: Int,
+        val methodCallsDiscarded: Int,
+        val methodCallsDiscardedPlatform: Int,
+        val methodCallsDiscardedBlankTarget: Int,
+        val opcodeKeyCallCount: Int,
+        val argumentTagsBuilt: Int,
+        val argumentStringsBuilt: Int,
+        val argumentIntsBuilt: Int,
+        val hasCfg: Boolean,
     )
+
+    private class InstructionEvidenceBuilder(
+        private val methodEvidence: String,
+    ) {
+        var buildCount: Int = 0
+            private set
+
+        private var instructionIndex: Int = 0
+        private var opcode: String = ""
+        private var cached: String? = null
+
+        fun reset(
+            index: Int,
+            opcode: String,
+        ) {
+            instructionIndex = index
+            this.opcode = opcode
+            cached = null
+        }
+
+        fun value(): String {
+            cached?.let { return it }
+            val built = "$methodEvidence@$instructionIndex:$opcode"
+            cached = built
+            buildCount += 1
+            return built
+        }
+    }
+
+    private class InstructionRegisterBuffer(
+        initialCapacity: Int = 8,
+    ) {
+        private var values = IntArray(initialCapacity)
+        var size: Int = 0
+            private set
+
+        fun readFrom(instruction: Instruction): InstructionRegisterBuffer {
+            size = 0
+            when (instruction) {
+                is FiveRegisterInstruction -> {
+                    ensureCapacity(instruction.registerCount)
+                    if (instruction.registerCount > 0) append(instruction.registerC)
+                    if (instruction.registerCount > 1) append(instruction.registerD)
+                    if (instruction.registerCount > 2) append(instruction.registerE)
+                    if (instruction.registerCount > 3) append(instruction.registerF)
+                    if (instruction.registerCount > 4) append(instruction.registerG)
+                }
+                is RegisterRangeInstruction -> {
+                    ensureCapacity(instruction.registerCount)
+                    repeat(instruction.registerCount) { offset ->
+                        append(instruction.startRegister + offset)
+                    }
+                }
+                is ThreeRegisterInstruction -> {
+                    ensureCapacity(3)
+                    append(instruction.registerA)
+                    append(instruction.registerB)
+                    append(instruction.registerC)
+                }
+                is TwoRegisterInstruction -> {
+                    ensureCapacity(2)
+                    append(instruction.registerA)
+                    append(instruction.registerB)
+                }
+                is OneRegisterInstruction -> {
+                    ensureCapacity(1)
+                    append(instruction.registerA)
+                }
+            }
+            return this
+        }
+
+        fun firstOrNull(): Int? = if (size == 0) null else values[0]
+
+        inline fun forEach(action: (Int) -> Unit) {
+            for (index in 0 until size) {
+                action(values[index])
+            }
+        }
+
+        inline fun any(predicate: (Int) -> Boolean): Boolean {
+            for (index in 0 until size) {
+                if (predicate(values[index])) return true
+            }
+            return false
+        }
+
+        inline fun <T> mapToList(transform: (Int) -> T): List<T> {
+            val result = ArrayList<T>(size)
+            for (index in 0 until size) {
+                result += transform(values[index])
+            }
+            return result
+        }
+
+        inline fun <T : Any> mapNotNullToList(transform: (Int) -> T?): List<T> {
+            val result = ArrayList<T>(size)
+            for (index in 0 until size) {
+                transform(values[index])?.let(result::add)
+            }
+            return result
+        }
+
+        fun collectTags(registerTags: Map<Int, Collection<DataTag>>): Set<DataTag> {
+            val result = mutableSetOf<DataTag>()
+            forEach { register ->
+                result += registerTags[register].orEmpty()
+            }
+            return result
+        }
+
+        inline fun collectTags(
+            registerTags: Map<Int, Collection<DataTag>>,
+            predicate: (DataTag) -> Boolean,
+        ): Set<DataTag> {
+            val result = mutableSetOf<DataTag>()
+            forEach { register ->
+                registerTags[register].orEmpty().forEach { tag ->
+                    if (predicate(tag)) result += tag
+                }
+            }
+            return result
+        }
+
+        private fun append(register: Int) {
+            values[size] = register
+            size += 1
+        }
+
+        private fun ensureCapacity(capacity: Int) {
+            if (values.size >= capacity) return
+            var newCapacity = values.size
+            while (newCapacity < capacity) {
+                newCapacity *= 2
+            }
+            values = values.copyOf(newCapacity)
+        }
+    }
 
     private data class CfgStats(
         val nodes: Int,
@@ -4391,6 +5046,9 @@ class AppSemanticAnalyzer @Inject constructor() {
     private data class MethodFlowSummary(
         val returnTags: Set<DataTag>,
         val fieldTags: Map<FieldKey, Set<DataTag>>,
+        val instructionsVisited: Int,
+        val opcodeKeyCalls: Int,
+        val registerReads: Int,
     )
 
     private data class MethodKey(
@@ -4450,6 +5108,14 @@ class AppSemanticAnalyzer @Inject constructor() {
             nativeLibraries
                 .getOrPut(libraryName) { NativeLibrarySummary(libraryName = libraryName, evidence = fact.evidence) }
                 .facts += fact
+        }
+
+        fun nativeLibrarySymbolTextCount(libraryName: String): Long {
+            return nativeLibraries[libraryName]?.symbolTexts?.size?.toLong() ?: 0L
+        }
+
+        fun nativeLibraryJniSymbolTextCount(libraryName: String): Long {
+            return nativeLibraries[libraryName]?.jniSymbolTexts?.size?.toLong() ?: 0L
         }
     }
 
@@ -5436,6 +6102,12 @@ class AppSemanticAnalyzer @Inject constructor() {
             "inspect",
             "verify",
         )
+        private val OPCODE_KEY_CACHE: Map<Opcode, String> =
+            EnumMap<Opcode, String>(Opcode::class.java).apply {
+                Opcode.values().forEach { opcode ->
+                    put(opcode, opcode.name.lowercase().replace('_', '-'))
+                }
+            }
         private val PLATFORM_CLASS_PREFIXES = listOf(
             "android.",
             "androidx.",

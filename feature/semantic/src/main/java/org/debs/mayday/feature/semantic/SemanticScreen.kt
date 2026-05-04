@@ -108,7 +108,8 @@ internal fun SemanticScreen(
                     SemanticScanStatusCard(
                         state = state,
                         text = text,
-                        onRestartClick = { onEvent(SemanticUiEvent.RestartScanClicked) },
+                        onScanAllClick = { onEvent(SemanticUiEvent.ScanAllClicked) },
+                        onScanSelectedClick = { onEvent(SemanticUiEvent.ScanSelectedClicked) },
                         onPauseClick = { onEvent(SemanticUiEvent.PauseScanClicked) },
                         onResumeClick = { onEvent(SemanticUiEvent.ResumeScanClicked) },
                         onExportClick = { onEvent(SemanticUiEvent.ExportReportClicked) },
@@ -149,6 +150,12 @@ internal fun SemanticScreen(
                             onValueChange = { onEvent(SemanticUiEvent.SearchQueryChanged(it)) },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
                         )
+                        SemanticSelectionControls(
+                            selectedCount = state.selectedPackageNames.size,
+                            text = text,
+                            onSelectVisibleClick = { onEvent(SemanticUiEvent.SelectVisibleAppsClicked) },
+                            onClearSelectionClick = { onEvent(SemanticUiEvent.ClearSelectionClicked) },
+                        )
                     }
                 }
 
@@ -185,8 +192,19 @@ internal fun SemanticScreen(
                             SemanticAppRow(
                                 item = item,
                                 isScanning = item.app.packageName in state.scanningPackageNames,
+                                isQueued = item.app.packageName in state.queuedPackageNames,
+                                isSelected = item.app.packageName in state.selectedPackageNames,
                                 text = text,
                                 onClick = { onEvent(SemanticUiEvent.DetailsClicked(item.app.packageName)) },
+                                onSelectionChanged = {
+                                    onEvent(
+                                        SemanticUiEvent.AppSelectionChanged(
+                                            packageName = item.app.packageName,
+                                            selected = it,
+                                        ),
+                                    )
+                                },
+                                onScanClick = { onEvent(SemanticUiEvent.ScanAppClicked(item.app.packageName)) },
                             )
                         }
                     }
@@ -239,10 +257,50 @@ private fun LoadingCard(
 }
 
 @Composable
+private fun SemanticSelectionControls(
+    selectedCount: Int,
+    text: SemanticText,
+    onSelectVisibleClick: () -> Unit,
+    onClearSelectionClick: () -> Unit,
+) {
+    val density = LocalMaydayDensity.current
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = text.selectedCount(selectedCount),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            MaydayActionButton(
+                text = text.selectVisible,
+                onClick = onSelectVisibleClick,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(density.actionHeight),
+                filled = false,
+            )
+            MaydayActionButton(
+                text = text.clearSelection,
+                onClick = onClearSelectionClick,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(density.actionHeight),
+                filled = false,
+                enabled = selectedCount > 0,
+            )
+        }
+    }
+}
+
+@Composable
 private fun SemanticScanStatusCard(
     state: SemanticUiState,
     text: SemanticText,
-    onRestartClick: () -> Unit,
+    onScanAllClick: () -> Unit,
+    onScanSelectedClick: () -> Unit,
     onPauseClick: () -> Unit,
     onResumeClick: () -> Unit,
     onExportClick: () -> Unit,
@@ -303,9 +361,20 @@ private fun SemanticScanStatusCard(
             )
         }
         if (!state.isScanRunning && state.totalApps > 0) {
+            if (state.selectedPackageNames.isNotEmpty()) {
+                MaydayActionButton(
+                    text = text.scanSelected,
+                    onClick = onScanSelectedClick,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(density.actionHeight),
+                    filled = true,
+                    enabled = !state.isExportingReport,
+                )
+            }
             MaydayActionButton(
-                text = text.restart,
-                onClick = onRestartClick,
+                text = text.scanAll,
+                onClick = onScanAllClick,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(density.actionHeight),
@@ -395,6 +464,7 @@ private fun scanStatusText(
     return when {
         state.isScanPaused -> "${text.paused} ${state.scannedApps}/${state.totalApps}"
         state.isScanRunning -> "${text.analyzing} ${state.scannedApps}/${state.totalApps}"
+        state.scannedApps == 0 -> "${text.ready} ${state.scannedApps}/${state.totalApps}"
         else -> "${text.complete} ${state.scannedApps}/${state.totalApps}"
     }
 }
@@ -403,48 +473,83 @@ private fun scanStatusText(
 private fun SemanticAppRow(
     item: SemanticAppItem,
     isScanning: Boolean,
+    isQueued: Boolean,
+    isSelected: Boolean,
     text: SemanticText,
     onClick: () -> Unit,
+    onSelectionChanged: (Boolean) -> Unit,
+    onScanClick: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
+    val density = LocalMaydayDensity.current
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.Top,
         ) {
-            Text(
-                text = item.app.label,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+            MaydayToggle(
+                checked = isSelected,
+                onCheckedChange = { selected ->
+                    if (!item.app.isSystem && !isScanning) {
+                        onSelectionChanged(selected)
+                    }
+                },
             )
-            Text(
-                text = item.app.packageName,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            item.app.versionName?.takeIf(String::isNotBlank)?.let { version ->
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
                 Text(
-                    text = version,
+                    text = item.app.label,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = item.app.packageName,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                item.app.versionName?.takeIf(String::isNotBlank)?.let { version ->
+                    Text(
+                        text = version,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
-            SemanticBadge(
-                result = item.analysis,
-                isScanning = isScanning,
-                text = text,
+        }
+        SemanticBadge(
+            result = item.analysis,
+            isScanning = isScanning,
+            isQueued = isQueued,
+            text = text,
+        )
+        MaydayActionButton(
+            text = text.scanApp,
+            onClick = onScanClick,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(density.actionHeight),
+            filled = false,
+            enabled = !item.app.isSystem && !isScanning && !isQueued,
+        )
+        if (item.app.isSystem) {
+            Text(
+                text = text.systemAppBlocked,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
@@ -454,9 +559,10 @@ private fun SemanticAppRow(
 private fun SemanticBadge(
     result: AppSemanticAnalysisResult,
     isScanning: Boolean,
+    isQueued: Boolean = false,
     text: SemanticText,
 ) {
-    val color = if (isScanning) {
+    val color = if (isScanning || isQueued) {
         MaterialTheme.colorScheme.onSurfaceVariant
     } else {
         semanticRiskColor(result.riskLevel)
@@ -492,6 +598,7 @@ private fun SemanticBadge(
                 Text(
                     text = when {
                         isScanning -> text.analyzing
+                        isQueued -> text.queued
                         result.scannedAtEpochMillis == 0L -> text.pending
                         else -> "${text.level(result.riskLevel)} · ${result.score}"
                     },
@@ -499,7 +606,7 @@ private fun SemanticBadge(
                     fontWeight = FontWeight.SemiBold,
                     color = color,
                 )
-                if (!isScanning && result.scannedAtEpochMillis != 0L) {
+                if (!isScanning && !isQueued && result.scannedAtEpochMillis != 0L) {
                     Text(
                         text = "${text.verdictStatus(result.verdictStatus)} · ${result.verdictConfidence}",
                         style = MaterialTheme.typography.labelSmall,
@@ -730,10 +837,17 @@ private data class SemanticText(
     val loadingApps: String,
     val analyzing: String,
     val complete: String,
+    val ready: String,
     val restart: String,
     val pause: String,
     val resume: String,
     val paused: String,
+    val scanAll: String,
+    val scanSelected: String,
+    val scanApp: String,
+    val selectVisible: String,
+    val clearSelection: String,
+    val selectedCount: (Int) -> String,
     val shareBundle: String,
     val exporting: String,
     val cancelExport: String,
@@ -746,6 +860,8 @@ private data class SemanticText(
     val noAppsHint: String,
     val badgeTitle: String,
     val pending: String,
+    val queued: String,
+    val systemAppBlocked: String,
     val methods: String,
     val signals: String,
     val noSignals: String,
@@ -797,11 +913,18 @@ private fun semanticText(language: AppLanguage): SemanticText {
             loadingApps = "Читаем список установленных приложений",
             analyzing = "анализ",
             complete = "готово",
+            ready = "ожидает запуска",
             restart = "Перезапустить анализ",
             pause = "Пауза",
             resume = "Продолжить",
             paused = "пауза",
-            shareBundle = "Поделиться ZIP",
+            scanAll = "Проверить все",
+            scanSelected = "Проверить выбранные",
+            scanApp = "Проверить приложение",
+            selectVisible = "Выбрать видимые",
+            clearSelection = "Снять выбор",
+            selectedCount = { count -> "Выбрано: $count" },
+            shareBundle = "Поделиться JSON",
             exporting = "Экспорт...",
             cancelExport = "Отменить экспорт",
             exportPauseHint = "Для экспорта поставь сканирование на паузу и дождись завершения текущего приложения",
@@ -813,6 +936,8 @@ private fun semanticText(language: AppLanguage): SemanticText {
             noAppsHint = "Попробуй изменить поиск или включить системные приложения",
             badgeTitle = "semantic",
             pending = "ожидает",
+            queued = "в очереди",
+            systemAppBlocked = "Системные приложения не сканируются",
             methods = "методы",
             signals = "сигналы",
             noSignals = "Семантических сигналов не найдено",
@@ -898,10 +1023,10 @@ private fun semanticText(language: AppLanguage): SemanticText {
             source = { source -> source.name.lowercase().replace('_', ' ') },
             exportStage = { stage ->
                 when (stage) {
-                    SemanticExportUiStage.PREPARING -> "Подготовка ZIP"
+                    SemanticExportUiStage.PREPARING -> "Подготовка JSON"
                     SemanticExportUiStage.WRITING_REPORT -> "Запись report.json"
-                    SemanticExportUiStage.COPYING_ARTIFACTS -> "Копирование APK"
-                    SemanticExportUiStage.FINALIZING -> "Завершение ZIP"
+                    SemanticExportUiStage.COPYING_ARTIFACTS -> "Копирование файлов"
+                    SemanticExportUiStage.FINALIZING -> "Завершение экспорта"
                 }
             },
             exportProgress = { progress ->
@@ -916,11 +1041,18 @@ private fun semanticText(language: AppLanguage): SemanticText {
             loadingApps = "Reading installed applications",
             analyzing = "analyzing",
             complete = "complete",
+            ready = "ready",
             restart = "Restart analysis",
             pause = "Pause",
             resume = "Resume",
             paused = "paused",
-            shareBundle = "Share ZIP",
+            scanAll = "Scan all",
+            scanSelected = "Scan selected",
+            scanApp = "Scan app",
+            selectVisible = "Select visible",
+            clearSelection = "Clear",
+            selectedCount = { count -> "Selected: $count" },
+            shareBundle = "Share JSON",
             exporting = "Exporting...",
             cancelExport = "Cancel export",
             exportPauseHint = "Pause scanning and wait for the current app to finish before exporting",
@@ -932,6 +1064,8 @@ private fun semanticText(language: AppLanguage): SemanticText {
             noAppsHint = "Try changing search or enabling system apps",
             badgeTitle = "semantic",
             pending = "pending",
+            queued = "queued",
+            systemAppBlocked = "System apps are not scanned",
             methods = "methods",
             signals = "signals",
             noSignals = "No semantic signals detected",
@@ -1017,10 +1151,10 @@ private fun semanticText(language: AppLanguage): SemanticText {
             source = { source -> source.name.lowercase().replace('_', ' ') },
             exportStage = { stage ->
                 when (stage) {
-                    SemanticExportUiStage.PREPARING -> "Preparing ZIP"
+                    SemanticExportUiStage.PREPARING -> "Preparing JSON"
                     SemanticExportUiStage.WRITING_REPORT -> "Writing report.json"
-                    SemanticExportUiStage.COPYING_ARTIFACTS -> "Copying APK artifacts"
-                    SemanticExportUiStage.FINALIZING -> "Finalizing ZIP"
+                    SemanticExportUiStage.COPYING_ARTIFACTS -> "Copying files"
+                    SemanticExportUiStage.FINALIZING -> "Finalizing export"
                 }
             },
             exportProgress = { progress ->

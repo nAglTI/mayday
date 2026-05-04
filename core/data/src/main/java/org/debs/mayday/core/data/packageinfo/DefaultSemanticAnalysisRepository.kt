@@ -15,14 +15,10 @@ import org.debs.mayday.core.model.AppSemanticSignal
 import java.util.concurrent.ConcurrentHashMap
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.BufferedOutputStream
 import java.io.File
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
-import java.util.zip.Deflater
-import java.util.zip.ZipEntry
-import java.util.zip.ZipOutputStream
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -79,6 +75,14 @@ class DefaultSemanticAnalysisRepository @Inject constructor(
         }
     }
 
+    override suspend fun apkSizeBytes(packageName: String): Long? = withContext(Dispatchers.IO) {
+        prepareAnalysis(packageName)?.apkPaths
+            ?.asSequence()
+            ?.map(::File)
+            ?.filter(File::isFile)
+            ?.sumOf(File::length)
+    }
+
     override suspend fun exportReport(
         items: List<SemanticAnalysisExportItem>,
         onProgress: (SemanticAnalysisExportProgress) -> Unit,
@@ -86,142 +90,57 @@ class DefaultSemanticAnalysisRepository @Inject constructor(
         val directory = context.getExternalFilesDir(EXPORT_DIRECTORY) ?: File(context.filesDir, EXPORT_DIRECTORY)
         directory.mkdirs()
         val timestamp = System.currentTimeMillis()
-        val file = File(directory, "semantic-analysis-bundle-$timestamp.zip")
+        val file = File(directory, "semantic-analysis-results-$timestamp.json")
         val tempFile = File(directory, "${file.name}.tmp")
-        var lastProgressAt = 0L
-        fun emitProgress(
-            progress: SemanticAnalysisExportProgress,
-            force: Boolean = false,
-        ) {
-            val now = System.currentTimeMillis()
-            if (force || now - lastProgressAt >= EXPORT_PROGRESS_THROTTLE_MS) {
-                lastProgressAt = now
-                onProgress(progress)
-            }
-        }
 
         val exportCoroutineContext = currentCoroutineContext()
         exportCoroutineContext.ensureActive()
-        emitProgress(
+        onProgress(
             SemanticAnalysisExportProgress(
                 stage = SemanticAnalysisExportStage.PREPARING,
                 totalFiles = 1,
             ),
-            force = true,
         )
-        val payloads = items.map { item ->
-            exportCoroutineContext.ensureActive()
-            SemanticAnalysisExportPayload(
-                item = item,
-                artifacts = exportArtifactsFor(item.app.packageName),
-            )
-        }
-        val artifacts = payloads.flatMap { it.artifacts }
-        val totalFiles = 1 + artifacts.size
-        val totalBytes = artifacts.sumOf { it.sizeBytes }
         val json = JSONObject()
             .put("schema_version", EXPORT_SCHEMA_VERSION)
             .put("analyzer_version", AppSemanticAnalyzer.ANALYZER_VERSION)
             .put("generated_at_epoch_millis", timestamp)
             .put("exporter_package_name", context.packageName)
             .put("exported_apps", items.size)
-            .put("bundle_format", "zip")
-            .put("report_entry", REPORT_ENTRY_NAME)
-            .put("apps", payloads.toExportJsonArray())
+            .put("bundle_format", "json")
+            .put("apps", items.toExportJsonArray())
         val jsonBytes = json.toString(JSON_INDENT).toByteArray(StandardCharsets.UTF_8)
-        var completedFiles = 0
-        var copiedBytes = 0L
-        val exportTotalBytes = totalBytes + jsonBytes.size
         runCatching {
-            ZipOutputStream(BufferedOutputStream(tempFile.outputStream())).use { zip ->
-                zip.setLevel(Deflater.DEFAULT_COMPRESSION)
-                zip.putNextEntry(ZipEntry(REPORT_ENTRY_NAME))
-                emitProgress(
-                    SemanticAnalysisExportProgress(
-                        stage = SemanticAnalysisExportStage.WRITING_REPORT,
-                        currentFileName = REPORT_ENTRY_NAME,
-                        completedFiles = completedFiles,
-                        totalFiles = totalFiles,
-                        copiedBytes = copiedBytes,
-                        totalBytes = exportTotalBytes,
-                    ),
-                    force = true,
-                )
-                zip.write(jsonBytes)
-                copiedBytes += jsonBytes.size
-                zip.closeEntry()
-                completedFiles += 1
-                emitProgress(
-                    SemanticAnalysisExportProgress(
-                        stage = SemanticAnalysisExportStage.WRITING_REPORT,
-                        currentFileName = REPORT_ENTRY_NAME,
-                        completedFiles = completedFiles,
-                        totalFiles = totalFiles,
-                        copiedBytes = copiedBytes,
-                        totalBytes = exportTotalBytes,
-                    ),
-                    force = true,
-                )
-
-                zip.setLevel(Deflater.NO_COMPRESSION)
-                artifacts.forEach { artifact ->
-                    exportCoroutineContext.ensureActive()
-                    zip.putNextEntry(ZipEntry(artifact.entryName))
-                    emitProgress(
-                        SemanticAnalysisExportProgress(
-                            stage = SemanticAnalysisExportStage.COPYING_ARTIFACTS,
-                            currentFileName = artifact.sourceName,
-                            completedFiles = completedFiles,
-                            totalFiles = totalFiles,
-                            copiedBytes = copiedBytes,
-                            totalBytes = exportTotalBytes,
-                        ),
-                        force = true,
-                    )
-                    artifact.file.inputStream().use { input ->
-                        val buffer = ByteArray(EXPORT_BUFFER_SIZE)
-                        while (true) {
-                            exportCoroutineContext.ensureActive()
-                            val read = input.read(buffer)
-                            if (read < 0) break
-                            zip.write(buffer, 0, read)
-                            copiedBytes += read
-                            emitProgress(
-                                SemanticAnalysisExportProgress(
-                                    stage = SemanticAnalysisExportStage.COPYING_ARTIFACTS,
-                                    currentFileName = artifact.sourceName,
-                                    completedFiles = completedFiles,
-                                    totalFiles = totalFiles,
-                                    copiedBytes = copiedBytes,
-                                    totalBytes = exportTotalBytes,
-                                ),
-                            )
-                        }
-                    }
-                    zip.closeEntry()
-                    completedFiles += 1
-                    emitProgress(
-                        SemanticAnalysisExportProgress(
-                            stage = SemanticAnalysisExportStage.COPYING_ARTIFACTS,
-                            currentFileName = artifact.sourceName,
-                            completedFiles = completedFiles,
-                            totalFiles = totalFiles,
-                            copiedBytes = copiedBytes,
-                            totalBytes = exportTotalBytes,
-                        ),
-                        force = true,
-                    )
-                }
-            }
-            emitProgress(
+            onProgress(
+                SemanticAnalysisExportProgress(
+                    stage = SemanticAnalysisExportStage.WRITING_REPORT,
+                    currentFileName = file.name,
+                    completedFiles = 0,
+                    totalFiles = 1,
+                    copiedBytes = 0,
+                    totalBytes = jsonBytes.size.toLong(),
+                ),
+            )
+            exportCoroutineContext.ensureActive()
+            tempFile.writeBytes(jsonBytes)
+            onProgress(
+                SemanticAnalysisExportProgress(
+                    stage = SemanticAnalysisExportStage.WRITING_REPORT,
+                    currentFileName = file.name,
+                    completedFiles = 1,
+                    totalFiles = 1,
+                    copiedBytes = jsonBytes.size.toLong(),
+                    totalBytes = jsonBytes.size.toLong(),
+                ),
+            )
+            onProgress(
                 SemanticAnalysisExportProgress(
                     stage = SemanticAnalysisExportStage.FINALIZING,
-                    completedFiles = completedFiles,
-                    totalFiles = totalFiles,
-                    copiedBytes = copiedBytes,
-                    totalBytes = exportTotalBytes,
+                    completedFiles = 1,
+                    totalFiles = 1,
+                    copiedBytes = jsonBytes.size.toLong(),
+                    totalBytes = jsonBytes.size.toLong(),
                 ),
-                force = true,
             )
             Files.move(
                 tempFile.toPath(),
@@ -236,6 +155,7 @@ class DefaultSemanticAnalysisRepository @Inject constructor(
             fileName = file.name,
             absolutePath = file.absolutePath,
             exportedApps = items.size,
+            mimeType = JSON_MIME_TYPE,
         )
     }
 
@@ -302,39 +222,20 @@ class DefaultSemanticAnalysisRepository @Inject constructor(
         return listOfNotNull(publicSourceDir) + splitPublicSourceDirs.orEmpty()
     }
 
-    private fun exportArtifactsFor(packageName: String): List<SemanticAnalysisExportArtifact> {
-        val request = prepareAnalysis(packageName) ?: return emptyList()
-        val packageSegment = packageName.safeZipSegment()
-        return request.apkPaths.mapIndexedNotNull { index, path ->
-            val source = File(path)
-            if (!source.isFile || !source.canRead()) return@mapIndexedNotNull null
-            val role = if (index == 0) "base" else "split-$index"
-            val entryName = "artifacts/$packageSegment/${role}-${source.name.safeZipSegment()}"
-            SemanticAnalysisExportArtifact(
-                entryName = entryName,
-                sourcePath = source.absolutePath,
-                sourceName = source.name,
-                sizeBytes = source.length(),
-                file = source,
-            )
-        }
-    }
-
-    private fun List<SemanticAnalysisExportPayload>.toExportJsonArray(): JSONArray {
+    private fun List<SemanticAnalysisExportItem>.toExportJsonArray(): JSONArray {
         val array = JSONArray()
-        forEach { payload -> array.put(payload.toJson()) }
+        forEach { item -> array.put(item.toJson()) }
         return array
     }
 
-    private fun SemanticAnalysisExportPayload.toJson(): JSONObject {
+    private fun SemanticAnalysisExportItem.toJson(): JSONObject {
         return JSONObject()
-            .put("label", item.app.label)
-            .put("package_name", item.app.packageName)
-            .put("is_system", item.app.isSystem)
-            .putNullable("version_name", item.app.versionName)
-            .putNullable("version_code", item.app.versionCode)
-            .put("analysis", item.analysis.toExportJson())
-            .put("artifacts", artifacts.toArtifactsJsonArray())
+            .put("label", app.label)
+            .put("package_name", app.packageName)
+            .put("is_system", app.isSystem)
+            .putNullable("version_name", app.versionName)
+            .putNullable("version_code", app.versionCode)
+            .put("analysis", analysis.toExportJson())
     }
 
     private fun AppSemanticAnalysisResult.toExportJson(): JSONObject {
@@ -398,43 +299,12 @@ class DefaultSemanticAnalysisRepository @Inject constructor(
         return array
     }
 
-    private fun List<SemanticAnalysisExportArtifact>.toArtifactsJsonArray(): JSONArray {
-        val array = JSONArray()
-        forEach { artifact ->
-            array.put(
-                JSONObject()
-                    .put("entry_name", artifact.entryName)
-                    .put("source_name", artifact.sourceName)
-                    .put("source_path", artifact.sourcePath)
-                    .put("size_bytes", artifact.sizeBytes),
-            )
-        }
-        return array
-    }
-
     private fun JSONObject.putNullable(
         name: String,
         value: Any?,
     ): JSONObject {
         return put(name, value ?: JSONObject.NULL)
     }
-
-    private fun String.safeZipSegment(): String {
-        return replace(UNSAFE_ZIP_SEGMENT_CHARS, "_").ifBlank { "unknown" }
-    }
-
-    private data class SemanticAnalysisExportPayload(
-        val item: SemanticAnalysisExportItem,
-        val artifacts: List<SemanticAnalysisExportArtifact>,
-    )
-
-    private data class SemanticAnalysisExportArtifact(
-        val entryName: String,
-        val sourcePath: String,
-        val sourceName: String,
-        val sizeBytes: Long,
-        val file: File,
-    )
 
     private data class PreparedSemanticAnalysis(
         val versionCode: Long,
@@ -445,11 +315,8 @@ class DefaultSemanticAnalysisRepository @Inject constructor(
 
     private companion object {
         const val EXPORT_DIRECTORY = "semantic_exports"
-        const val EXPORT_SCHEMA_VERSION = 1
+        const val EXPORT_SCHEMA_VERSION = 2
         const val JSON_INDENT = 2
-        const val REPORT_ENTRY_NAME = "report.json"
-        const val EXPORT_BUFFER_SIZE = 128 * 1024
-        const val EXPORT_PROGRESS_THROTTLE_MS = 250L
-        val UNSAFE_ZIP_SEGMENT_CHARS = Regex("[^A-Za-z0-9._-]")
+        const val JSON_MIME_TYPE = "application/json"
     }
 }

@@ -17,6 +17,10 @@ interface SemanticAnalysisRepository {
     suspend fun cachedAnalysis(
         packageName: String,
     ): AppSemanticAnalysisResult?
+
+    suspend fun apkSizeBytes(
+        packageName: String,
+    ): Long?
 }
 
 data class SemanticAnalysisExportItem(
@@ -28,6 +32,7 @@ data class SemanticAnalysisExportResult(
     val fileName: String,
     val absolutePath: String,
     val exportedApps: Int,
+    val mimeType: String,
 )
 
 data class SemanticAnalysisExportProgress(

@@ -15,6 +15,8 @@ data class SemanticUiState(
     val isScanRunning: Boolean = false,
     val isScanPaused: Boolean = false,
     val isExportingReport: Boolean = false,
+    val selectedPackageNames: Set<String> = emptySet(),
+    val queuedPackageNames: Set<String> = emptySet(),
     val scanningPackageNames: Set<String> = emptySet(),
     val currentScanPackageName: String? = null,
     val currentScanLabel: String? = null,
