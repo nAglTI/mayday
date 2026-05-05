@@ -29,7 +29,7 @@ kotlin {
 dependencies {
     implementation(project(":core:model"))
 
-    compileOnly(files(rootProject.file("app/libs/vpncore.aar")))
+    compileOnly(files(rootProject.file("app/libs/mdcore.aar")))
 
     implementation(libs.hilt.android)
     implementation(libs.kotlinx.coroutines.android)

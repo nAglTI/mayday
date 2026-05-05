@@ -1,5 +1,7 @@
 package org.debs.mayday.feature.semantic
 
+import android.os.SystemClock
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -164,6 +166,7 @@ class SemanticViewModel @Inject constructor(
 
     private fun scanSelected() {
         val selectedPackageNames = uiState.value.selectedPackageNames
+        Log.d(SCAN_QUEUE_LOG_TAG, "scanSelected selected=${selectedPackageNames.size}")
         if (selectedPackageNames.isEmpty()) {
             update { copy(message = scanMessageNoSelection(uiPreferences.language)) }
             return
@@ -321,6 +324,10 @@ class SemanticViewModel @Inject constructor(
             )
         val totalApps = allItems.count { !it.app.isSystem }
         val totalQueueApps = packagesToScan.size
+        Log.d(
+            SCAN_QUEUE_LOG_TAG,
+            "scanInBackground force=$force requested=${packageNames?.size ?: -1} queue=$totalQueueApps totalApps=$totalApps",
+        )
         if (packagesToScan.isEmpty()) {
             update {
                 copy(
@@ -353,12 +360,23 @@ class SemanticViewModel @Inject constructor(
             try {
                 val progressEvents = Channel<SemanticScanProgressEvent>(Channel.BUFFERED)
                 var scannedApps = 0
+                val sizePreflightStartedAt = SystemClock.elapsedRealtime()
+                Log.d(SCAN_QUEUE_LOG_TAG, "sizePreflight start queue=$totalQueueApps")
                 val scanItems = packagesToScan.map { item ->
+                    val apkSizeBytes = semanticAnalysisRepository.apkSizeBytes(item.app.packageName) ?: 0L
+                    Log.d(
+                        SCAN_QUEUE_LOG_TAG,
+                        "sizePreflight item package=${item.app.packageName} size=${apkSizeBytes.toMiBString()}",
+                    )
                     SemanticScanQueueItem(
                         item = item,
-                        apkSizeBytes = semanticAnalysisRepository.apkSizeBytes(item.app.packageName) ?: 0L,
+                        apkSizeBytes = apkSizeBytes,
                     )
                 }
+                Log.d(
+                    SCAN_QUEUE_LOG_TAG,
+                    "sizePreflight done queue=${scanItems.size} durationMs=${SystemClock.elapsedRealtime() - sizePreflightStartedAt}",
+                )
                 coroutineScope {
                     val scheduler = launch {
                         runSizeAwareScanQueue(
@@ -437,21 +455,41 @@ class SemanticViewModel @Inject constructor(
         var activeCount = 0
         var activeHugeCount = 0
         var activeBytes = 0L
+        Log.d(
+            SCAN_QUEUE_LOG_TAG,
+            "scheduler start items=${scanItems.size} maxWorkers=${limits.maxWorkers} maxHuge=${limits.maxHugeWorkers} maxBytes=${limits.maxTotalApkBytesInFlight.toMiBString()}",
+        )
+
+        fun startBlockReason(item: SemanticScanQueueItem): String? {
+            if (activeCount >= limits.maxWorkers) return "maxWorkers"
+            if (item.isHuge && activeHugeCount >= limits.maxHugeWorkers) return "maxHugeWorkers"
+            val nextBytes = activeBytes + item.apkSizeBytes
+            if (activeCount != 0 && item.apkSizeBytes != 0L && nextBytes > limits.maxTotalApkBytesInFlight) {
+                return "maxBytes next=${nextBytes.toMiBString()}"
+            }
+            return null
+        }
 
         fun canStart(item: SemanticScanQueueItem): Boolean {
-            if (activeCount >= limits.maxWorkers) return false
-            if (item.isHuge && activeHugeCount >= limits.maxHugeWorkers) return false
-            val nextBytes = activeBytes + item.apkSizeBytes
-            return activeCount == 0 || item.apkSizeBytes == 0L || nextBytes <= limits.maxTotalApkBytesInFlight
+            return startBlockReason(item) == null
         }
 
         fun start(item: SemanticScanQueueItem) {
             activeCount += 1
             if (item.isHuge) activeHugeCount += 1
             activeBytes += item.apkSizeBytes
+            Log.d(
+                SCAN_QUEUE_LOG_TAG,
+                "worker scheduled package=${item.item.app.packageName} size=${item.apkSizeBytes.toMiBString()} active=$activeCount huge=$activeHugeCount activeBytes=${activeBytes.toMiBString()} pending=${pendingItems.size}",
+            )
             launch {
+                val workerStartedAt = SystemClock.elapsedRealtime()
                 try {
                     awaitScanResume()
+                    Log.d(
+                        SCAN_QUEUE_LOG_TAG,
+                        "worker started package=${item.item.app.packageName} thread=${Thread.currentThread().name}",
+                    )
                     progressEvents.send(
                         SemanticScanProgressEvent.Started(
                             packageName = item.item.app.packageName,
@@ -465,9 +503,14 @@ class SemanticViewModel @Inject constructor(
                         )
                     } catch (error: CancellationException) {
                         throw error
-                    } catch (_: Throwable) {
+                    } catch (error: Throwable) {
+                        Log.w(SCAN_QUEUE_LOG_TAG, "worker failed package=${item.item.app.packageName}", error)
                         null
                     }
+                    Log.d(
+                        SCAN_QUEUE_LOG_TAG,
+                        "worker analyzed package=${item.item.app.packageName} hasResult=${result != null} durationMs=${SystemClock.elapsedRealtime() - workerStartedAt}",
+                    )
                     progressEvents.send(
                         SemanticScanProgressEvent.Completed(
                             packageName = item.item.app.packageName,
@@ -475,6 +518,10 @@ class SemanticViewModel @Inject constructor(
                         ),
                     )
                 } finally {
+                    Log.d(
+                        SCAN_QUEUE_LOG_TAG,
+                        "worker finished package=${item.item.app.packageName} durationMs=${SystemClock.elapsedRealtime() - workerStartedAt}",
+                    )
                     completionEvents.trySend(item)
                 }
             }
@@ -487,14 +534,26 @@ class SemanticViewModel @Inject constructor(
                     start(pendingItems.removeFirst())
                     startedAny = true
                 }
+                if (!startedAny && pendingItems.isNotEmpty()) {
+                    val blocked = pendingItems.first()
+                    Log.d(
+                        SCAN_QUEUE_LOG_TAG,
+                        "scheduler blocked first=${blocked.item.app.packageName} reason=${startBlockReason(blocked)} active=$activeCount huge=$activeHugeCount activeBytes=${activeBytes.toMiBString()} pending=${pendingItems.size}",
+                    )
+                }
                 if (!startedAny && activeCount > 0) {
                     val completed = completionEvents.receive()
                     activeCount -= 1
                     if (completed.isHuge) activeHugeCount -= 1
                     activeBytes -= completed.apkSizeBytes
+                    Log.d(
+                        SCAN_QUEUE_LOG_TAG,
+                        "scheduler completion package=${completed.item.app.packageName} active=$activeCount huge=$activeHugeCount activeBytes=${activeBytes.toMiBString()} pending=${pendingItems.size}",
+                    )
                 }
             }
         } finally {
+            Log.d(SCAN_QUEUE_LOG_TAG, "scheduler done pending=${pendingItems.size} active=$activeCount")
             completionEvents.close()
         }
     }
@@ -678,7 +737,12 @@ class SemanticViewModel @Inject constructor(
     )
 
     private companion object {
+        const val SCAN_QUEUE_LOG_TAG = "SemanticScanQueue"
         const val BYTES_IN_MIB = 1024L * 1024L
         const val HUGE_APK_BYTES = 180L * BYTES_IN_MIB
+    }
+
+    private fun Long.toMiBString(): String {
+        return "${this / BYTES_IN_MIB}MiB"
     }
 }
