@@ -34,6 +34,7 @@ class DefaultSemanticAnalysisRepository @Inject constructor(
     override suspend fun analyzeApp(
         packageName: String,
         force: Boolean,
+        performanceConfig: SemanticAnalyzerPerformanceConfig,
     ): AppSemanticAnalysisResult? {
         val request = withContext(Dispatchers.IO) {
             prepareAnalysis(packageName)
@@ -54,6 +55,7 @@ class DefaultSemanticAnalysisRepository @Inject constructor(
                 versionCode = request.versionCode,
                 apkPaths = request.apkPaths,
                 cancellationCheck = { coroutineContext.ensureActive() },
+                performanceConfig = performanceConfig,
             )
         }.also { result ->
             cache[request.cacheKey] = result
@@ -185,12 +187,7 @@ class DefaultSemanticAnalysisRepository @Inject constructor(
             }
         }.getOrNull() ?: return null
 
-        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            packageInfo.longVersionCode
-        } else {
-            @Suppress("DEPRECATION")
-            packageInfo.versionCode.toLong()
-        }
+        val versionCode = packageInfo.longVersionCode
         val apkPaths = appInfo.apkPaths()
         val fingerprint = cacheStore.fingerprint(
             packageName = packageName,

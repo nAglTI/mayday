@@ -10,6 +10,7 @@ sealed interface SemanticUiEvent {
     data object ClearSelectionClicked : SemanticUiEvent
     data object PauseScanClicked : SemanticUiEvent
     data object ResumeScanClicked : SemanticUiEvent
+    data object NotificationPermissionDenied : SemanticUiEvent
     data object ExportReportClicked : SemanticUiEvent
     data object CancelExportClicked : SemanticUiEvent
     data object MessageShown : SemanticUiEvent

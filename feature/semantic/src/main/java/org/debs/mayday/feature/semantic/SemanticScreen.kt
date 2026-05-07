@@ -3,6 +3,7 @@ package org.debs.mayday.feature.semantic
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -16,6 +17,8 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -30,7 +33,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -39,6 +47,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import org.debs.mayday.core.designsystem.component.MaydayActionButton
 import org.debs.mayday.core.designsystem.component.MaydayScreenBackground
 import org.debs.mayday.core.designsystem.component.MaydaySectionTitle
@@ -69,6 +78,15 @@ internal fun SemanticScreen(
     val text = semanticText(state.uiPreferences.language)
     val density = LocalMaydayDensity.current
     val snackbarHostState = remember { SnackbarHostState() }
+    val appListState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
+    var showScanInfo by remember { mutableStateOf(false) }
+    val showAppScrollToTop = remember {
+        derivedStateOf {
+            appListState.firstVisibleItemIndex > 0 ||
+                appListState.firstVisibleItemScrollOffset > 0
+        }
+    }
     val detailsItem = state.detailsPackageName?.let { packageName ->
         state.apps.firstOrNull { it.app.packageName == packageName }
     }
@@ -84,131 +102,149 @@ internal fun SemanticScreen(
             containerColor = Color.Transparent,
             snackbarHost = { SnackbarHost(snackbarHostState) },
         ) { innerPadding ->
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .statusBarsPadding(),
-                contentPadding = PaddingValues(
-                    start = density.screenPadding,
-                    end = density.screenPadding,
-                    top = innerPadding.calculateTopPadding() + 6.dp,
-                    bottom = innerPadding.calculateBottomPadding() + density.sectionGap,
-                ),
-                verticalArrangement = Arrangement.spacedBy(density.sectionGap),
-            ) {
-                item {
-                    MaydayTopBar(
-                        title = text.title,
-                        onBackClick = { onEvent(SemanticUiEvent.BackClicked) },
-                        applyHorizontalPadding = false,
-                    )
-                }
+            Box(modifier = Modifier.fillMaxSize()) {
+                LazyColumn(
+                    state = appListState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .statusBarsPadding(),
+                    contentPadding = PaddingValues(
+                        start = density.screenPadding,
+                        end = density.screenPadding,
+                        top = innerPadding.calculateTopPadding() + 6.dp,
+                        bottom = innerPadding.calculateBottomPadding() + density.sectionGap + 54.dp,
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(density.sectionGap),
+                ) {
+                    item {
+                        MaydayTopBar(
+                            title = text.title,
+                            onBackClick = { onEvent(SemanticUiEvent.BackClicked) },
+                            applyHorizontalPadding = false,
+                        )
+                    }
 
-                item {
-                    SemanticScanStatusCard(
-                        state = state,
-                        text = text,
-                        onScanAllClick = { onEvent(SemanticUiEvent.ScanAllClicked) },
-                        onScanSelectedClick = { onEvent(SemanticUiEvent.ScanSelectedClicked) },
-                        onPauseClick = { onEvent(SemanticUiEvent.PauseScanClicked) },
-                        onResumeClick = { onEvent(SemanticUiEvent.ResumeScanClicked) },
-                        onExportClick = { onEvent(SemanticUiEvent.ExportReportClicked) },
-                        onCancelExportClick = { onEvent(SemanticUiEvent.CancelExportClicked) },
-                    )
-                }
+                    item {
+                        SemanticScanStatusCard(
+                            state = state,
+                            text = text,
+                            onScanAllClick = { onEvent(SemanticUiEvent.ScanAllClicked) },
+                            onScanSelectedClick = { onEvent(SemanticUiEvent.ScanSelectedClicked) },
+                            onPauseClick = { onEvent(SemanticUiEvent.PauseScanClicked) },
+                            onResumeClick = { onEvent(SemanticUiEvent.ResumeScanClicked) },
+                            onExportClick = { onEvent(SemanticUiEvent.ExportReportClicked) },
+                            onCancelExportClick = { onEvent(SemanticUiEvent.CancelExportClicked) },
+                            onInfoClick = { showScanInfo = true },
+                        )
+                    }
 
-                item {
-                    MaydaySurfaceCard {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(
-                                modifier = Modifier.weight(1f),
-                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                    item {
+                        MaydaySurfaceCard {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
                             ) {
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    Text(
+                                        text = text.showSystemApps,
+                                        style = MaterialTheme.typography.titleLarge,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                    Text(
+                                        text = text.showSystemAppsHint,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                MaydayToggle(
+                                    checked = state.showSystemApps,
+                                    onCheckedChange = { onEvent(SemanticUiEvent.ShowSystemAppsChanged(it)) },
+                                )
+                            }
+                            MaydayTextField(
+                                label = text.search,
+                                value = state.appSearchQuery,
+                                onValueChange = { onEvent(SemanticUiEvent.SearchQueryChanged(it)) },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                            )
+                            SemanticSelectionControls(
+                                selectedCount = state.selectedPackageNames.size,
+                                text = text,
+                                onSelectVisibleClick = { onEvent(SemanticUiEvent.SelectVisibleAppsClicked) },
+                                onClearSelectionClick = { onEvent(SemanticUiEvent.ClearSelectionClicked) },
+                            )
+                        }
+                    }
+
+                    item {
+                        MaydaySectionTitle(text = text.apps)
+                    }
+
+                    if (state.isLoading) {
+                        item {
+                            LoadingCard(title = text.loading, subtitle = text.loadingApps)
+                        }
+                    } else if (state.apps.isEmpty()) {
+                        item {
+                            MaydaySurfaceCard {
                                 Text(
-                                    text = text.showSystemApps,
+                                    text = text.noApps,
                                     style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Medium,
                                     color = MaterialTheme.colorScheme.onSurface,
                                 )
                                 Text(
-                                    text = text.showSystemAppsHint,
+                                    text = text.noAppsHint,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
-                            MaydayToggle(
-                                checked = state.showSystemApps,
-                                onCheckedChange = { onEvent(SemanticUiEvent.ShowSystemAppsChanged(it)) },
-                            )
                         }
-                        MaydayTextField(
-                            label = text.search,
-                            value = state.appSearchQuery,
-                            onValueChange = { onEvent(SemanticUiEvent.SearchQueryChanged(it)) },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
-                        )
-                        SemanticSelectionControls(
-                            selectedCount = state.selectedPackageNames.size,
-                            text = text,
-                            onSelectVisibleClick = { onEvent(SemanticUiEvent.SelectVisibleAppsClicked) },
-                            onClearSelectionClick = { onEvent(SemanticUiEvent.ClearSelectionClicked) },
-                        )
-                    }
-                }
-
-                item {
-                    MaydaySectionTitle(text = text.apps)
-                }
-
-                if (state.isLoading) {
-                    item {
-                        LoadingCard(title = text.loading, subtitle = text.loadingApps)
-                    }
-                } else if (state.apps.isEmpty()) {
-                    item {
-                        MaydaySurfaceCard {
-                            Text(
-                                text = text.noApps,
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Medium,
-                                color = MaterialTheme.colorScheme.onSurface,
-                            )
-                            Text(
-                                text = text.noAppsHint,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                } else {
-                    items(
-                        items = state.apps,
-                        key = { item -> item.app.packageName },
-                    ) { item ->
-                        MaydaySurfaceCard {
-                            SemanticAppRow(
-                                item = item,
-                                isScanning = item.app.packageName in state.scanningPackageNames,
-                                isQueued = item.app.packageName in state.queuedPackageNames,
-                                isSelected = item.app.packageName in state.selectedPackageNames,
-                                text = text,
-                                onClick = { onEvent(SemanticUiEvent.DetailsClicked(item.app.packageName)) },
-                                onSelectionChanged = {
-                                    onEvent(
-                                        SemanticUiEvent.AppSelectionChanged(
-                                            packageName = item.app.packageName,
-                                            selected = it,
-                                        ),
-                                    )
-                                },
-                                onScanClick = { onEvent(SemanticUiEvent.ScanAppClicked(item.app.packageName)) },
-                            )
+                    } else {
+                        items(
+                            items = state.apps,
+                            key = { item -> item.app.packageName },
+                        ) { item ->
+                            MaydaySurfaceCard {
+                                SemanticAppRow(
+                                    item = item,
+                                    isScanning = item.app.packageName in state.scanningPackageNames,
+                                    isQueued = item.app.packageName in state.queuedPackageNames,
+                                    isSelected = item.app.packageName in state.selectedPackageNames,
+                                    text = text,
+                                    onClick = { onEvent(SemanticUiEvent.DetailsClicked(item.app.packageName)) },
+                                    onSelectionChanged = {
+                                        onEvent(
+                                            SemanticUiEvent.AppSelectionChanged(
+                                                packageName = item.app.packageName,
+                                                selected = it,
+                                            ),
+                                        )
+                                    },
+                                    onScanClick = { onEvent(SemanticUiEvent.ScanAppClicked(item.app.packageName)) },
+                                )
+                            }
                         }
                     }
                 }
+                ScrollToTopButton(
+                    visible = showAppScrollToTop.value,
+                    onClick = {
+                        coroutineScope.launch {
+                            appListState.animateScrollToItem(0)
+                        }
+                    },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(
+                            end = density.screenPadding,
+                            bottom = innerPadding.calculateBottomPadding() + density.screenPadding,
+                        ),
+                )
             }
         }
 
@@ -218,6 +254,41 @@ internal fun SemanticScreen(
                 isScanning = detailsItem.app.packageName in state.scanningPackageNames,
                 text = text,
                 onDismiss = { onEvent(SemanticUiEvent.DetailsDismissed) },
+            )
+        }
+
+        if (showScanInfo) {
+            SemanticScanInfoSheet(
+                text = text,
+                onDismiss = { showScanInfo = false },
+            )
+        }
+    }
+}
+
+@Composable
+private fun ScrollToTopButton(
+    visible: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (!visible) return
+    Surface(
+        modifier = modifier
+            .size(44.dp)
+            .clickable(onClick = onClick),
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.primary,
+        contentColor = MaterialTheme.colorScheme.onPrimary,
+        tonalElevation = 4.dp,
+        shadowElevation = 6.dp,
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Text(
+                text = "^",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onPrimary,
             )
         }
     }
@@ -305,6 +376,7 @@ private fun SemanticScanStatusCard(
     onResumeClick: () -> Unit,
     onExportClick: () -> Unit,
     onCancelExportClick: () -> Unit,
+    onInfoClick: () -> Unit,
 ) {
     val density = LocalMaydayDensity.current
     val canExport = state.scannedApps > 0 &&
@@ -349,6 +421,10 @@ private fun SemanticScanStatusCard(
                 }
             }
         }
+        SemanticScanNotice(
+            text = text,
+            onInfoClick = onInfoClick,
+        )
         if (state.isScanRunning) {
             MaydayActionButton(
                 text = if (state.isScanPaused) text.resume else text.pause,
@@ -407,6 +483,116 @@ private fun SemanticScanStatusCard(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun SemanticScanNotice(
+    text: SemanticText,
+    onInfoClick: () -> Unit,
+) {
+    val density = LocalMaydayDensity.current
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        Text(
+            text = text.scanLoadTitle,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        Text(
+            text = text.scanLoadHint,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        MaydayActionButton(
+            text = text.scanInfoAction,
+            onClick = onInfoClick,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(density.actionHeight),
+            filled = false,
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SemanticScanInfoSheet(
+    text: SemanticText,
+    onDismiss: () -> Unit,
+) {
+    val density = LocalMaydayDensity.current
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = density.screenPadding)
+                .padding(bottom = density.screenPadding),
+            verticalArrangement = Arrangement.spacedBy(density.blockGap),
+        ) {
+            Text(
+                text = text.scanInfoTitle,
+                style = MaterialTheme.typography.headlineSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = text.scanInfoSummary,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            SemanticInfoRow(
+                title = text.scanInfoSelectTitle,
+                body = text.scanInfoSelectBody,
+            )
+            SemanticInfoRow(
+                title = text.scanInfoLoadTitle,
+                body = text.scanInfoLoadBody,
+            )
+            SemanticInfoRow(
+                title = text.scanInfoProgressTitle,
+                body = text.scanInfoProgressBody,
+            )
+            SemanticInfoRow(
+                title = text.scanInfoResultsTitle,
+                body = text.scanInfoResultsBody,
+            )
+            MaydayActionButton(
+                text = text.scanInfoClose,
+                onClick = onDismiss,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(density.actionHeight),
+                filled = true,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SemanticInfoRow(
+    title: String,
+    body: String,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Text(
+            text = body,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -485,57 +671,62 @@ private fun SemanticAppRow(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable(onClick = onClick),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.Top,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            MaydayToggle(
-                checked = isSelected,
-                onCheckedChange = { selected ->
-                    if (!item.app.isSystem && !isScanning) {
-                        onSelectionChanged(selected)
-                    }
-                },
-            )
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.Top,
             ) {
-                Text(
-                    text = item.app.label,
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                MaydayToggle(
+                    checked = isSelected,
+                    onCheckedChange = { selected ->
+                        if (!item.app.isSystem && !isScanning) {
+                            onSelectionChanged(selected)
+                        }
+                    },
                 )
-                Text(
-                    text = item.app.packageName,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                item.app.versionName?.takeIf(String::isNotBlank)?.let { version ->
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
                     Text(
-                        text = version,
+                        text = item.app.label,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = item.app.packageName,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    item.app.versionName?.takeIf(String::isNotBlank)?.let { version ->
+                        Text(
+                            text = version,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
+            SemanticBadge(
+                result = item.analysis,
+                isScanning = isScanning,
+                isQueued = isQueued,
+                text = text,
+            )
         }
-        SemanticBadge(
-            result = item.analysis,
-            isScanning = isScanning,
-            isQueued = isQueued,
-            text = text,
-        )
         MaydayActionButton(
             text = text.scanApp,
             onClick = onScanClick,
@@ -627,18 +818,28 @@ private fun SemanticDetailsSheet(
     onDismiss: () -> Unit,
 ) {
     val density = LocalMaydayDensity.current
+    val detailsListState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
+    val showDetailsScrollToTop = remember {
+        derivedStateOf {
+            detailsListState.firstVisibleItemIndex > 0 ||
+                detailsListState.firstVisibleItemScrollOffset > 0
+        }
+    }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         containerColor = MaterialTheme.colorScheme.surface,
         contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = density.screenPadding),
-            contentPadding = PaddingValues(bottom = density.screenPadding),
-            verticalArrangement = Arrangement.spacedBy(density.blockGap),
-        ) {
+        Box(modifier = Modifier.fillMaxWidth()) {
+            LazyColumn(
+                state = detailsListState,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = density.screenPadding),
+                contentPadding = PaddingValues(bottom = density.screenPadding + 54.dp),
+                verticalArrangement = Arrangement.spacedBy(density.blockGap),
+            ) {
             item {
                 Text(
                     text = item.app.label,
@@ -702,15 +903,37 @@ private fun SemanticDetailsSheet(
                     )
                 }
             } else {
-                items(
+                itemsIndexed(
                     items = item.analysis.signals,
-                    key = { signal -> "${signal.scope}:${signal.type}:${signal.title}:${signal.evidence}" },
-                ) { signal ->
+                    key = { index, signal -> semanticSignalLazyKey(index, signal) },
+                ) { _, signal ->
                     SemanticSignalRow(signal = signal, text = text)
                 }
             }
+            }
+            ScrollToTopButton(
+                visible = showDetailsScrollToTop.value,
+                onClick = {
+                    coroutineScope.launch {
+                        detailsListState.animateScrollToItem(0)
+                    }
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(
+                        end = density.screenPadding,
+                        bottom = density.screenPadding,
+                    ),
+            )
         }
     }
+}
+
+private fun semanticSignalLazyKey(
+    index: Int,
+    signal: AppSemanticSignal,
+): String {
+    return "signal:$index:${signal.scope}:${signal.type}:${signal.title.hashCode()}:${signal.evidence.hashCode()}"
 }
 
 @Composable
@@ -852,6 +1075,20 @@ private data class SemanticText(
     val exporting: String,
     val cancelExport: String,
     val exportPauseHint: String,
+    val scanLoadTitle: String,
+    val scanLoadHint: String,
+    val scanInfoAction: String,
+    val scanInfoTitle: String,
+    val scanInfoSummary: String,
+    val scanInfoSelectTitle: String,
+    val scanInfoSelectBody: String,
+    val scanInfoLoadTitle: String,
+    val scanInfoLoadBody: String,
+    val scanInfoProgressTitle: String,
+    val scanInfoProgressBody: String,
+    val scanInfoResultsTitle: String,
+    val scanInfoResultsBody: String,
+    val scanInfoClose: String,
     val showSystemApps: String,
     val showSystemAppsHint: String,
     val search: String,
@@ -928,6 +1165,20 @@ private fun semanticText(language: AppLanguage): SemanticText {
             exporting = "Экспорт...",
             cancelExport = "Отменить экспорт",
             exportPauseHint = "Для экспорта поставь сканирование на паузу и дождись завершения текущего приложения",
+            scanLoadTitle = "Сканирование нагружает телефон",
+            scanLoadHint = "Проверка разбирает APK и может идти несколько минут. Для быстрого прохода выбирай только нужные приложения.",
+            scanInfoAction = "Как работает анализ",
+            scanInfoTitle = "Как пользоваться анализом",
+            scanInfoSummary = "Сканер ищет связанные признаки VPN-detection в коде приложения и SDK. Это тяжелая проверка, поэтому она работает дольше обычного списка приложений.",
+            scanInfoSelectTitle = "1. Выбери приложения",
+            scanInfoSelectBody = "Можно выбрать видимые приложения, одно приложение или запустить полный проход. Полный проход лучше запускать только при необходимости.",
+            scanInfoLoadTitle = "2. Учитывай нагрузку",
+            scanInfoLoadBody = "Во время анализа CPU и память будут заняты. На больших APK или длинном списке проверка может занять десятки минут.",
+            scanInfoProgressTitle = "3. Следи за прогрессом",
+            scanInfoProgressBody = "Прогресс виден на экране и в уведомлении. Сканирование можно поставить на паузу и продолжить позже.",
+            scanInfoResultsTitle = "4. Открывай результаты",
+            scanInfoResultsBody = "Нажми на карточку приложения или плашку результата, чтобы увидеть score, proof, сигналы и найденные цепочки.",
+            scanInfoClose = "Понятно",
             showSystemApps = "Показывать системные приложения",
             showSystemAppsHint = "Системные пакеты видны в списке, но не сканируются автоматически",
             search = "поиск",
@@ -1056,6 +1307,20 @@ private fun semanticText(language: AppLanguage): SemanticText {
             exporting = "Exporting...",
             cancelExport = "Cancel export",
             exportPauseHint = "Pause scanning and wait for the current app to finish before exporting",
+            scanLoadTitle = "Scanning is CPU-heavy",
+            scanLoadHint = "The scanner parses APK code and can take several minutes. Select only the apps you need for a faster pass.",
+            scanInfoAction = "How analysis works",
+            scanInfoTitle = "How to use analysis",
+            scanInfoSummary = "The scanner looks for connected VPN-detection behavior in app and SDK code. It is heavier than reading the app list, so it takes longer.",
+            scanInfoSelectTitle = "1. Select apps",
+            scanInfoSelectBody = "Scan visible apps, one app, or the full list. Use a full scan only when you really need it.",
+            scanInfoLoadTitle = "2. Expect load",
+            scanInfoLoadBody = "CPU and memory will be busy while analysis runs. Large APKs or long lists can take tens of minutes.",
+            scanInfoProgressTitle = "3. Watch progress",
+            scanInfoProgressBody = "Progress is shown on this screen and in the notification. You can pause scanning and resume later.",
+            scanInfoResultsTitle = "4. Open results",
+            scanInfoResultsBody = "Tap an app card or result badge to see score, proof, signals, and detected chains.",
+            scanInfoClose = "Got it",
             showSystemApps = "Show system apps",
             showSystemAppsHint = "System packages are visible but are not scanned automatically",
             search = "search",

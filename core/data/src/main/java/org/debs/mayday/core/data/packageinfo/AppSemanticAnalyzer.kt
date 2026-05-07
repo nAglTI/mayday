@@ -23,7 +23,6 @@ import org.jf.dexlib2.iface.instruction.ReferenceInstruction
 import org.jf.dexlib2.iface.instruction.RegisterRangeInstruction
 import org.jf.dexlib2.iface.instruction.ThreeRegisterInstruction
 import org.jf.dexlib2.iface.instruction.TwoRegisterInstruction
-import org.jf.dexlib2.iface.instruction.VariableRegisterInstruction
 import org.jf.dexlib2.iface.instruction.WideLiteralInstruction
 import org.jf.dexlib2.iface.reference.FieldReference
 import org.jf.dexlib2.iface.reference.MethodReference
@@ -33,7 +32,15 @@ import org.jf.dexlib2.iface.reference.TypeReference
 import java.io.File
 import java.io.InputStream
 import java.util.EnumMap
+import java.util.concurrent.Callable
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.Semaphore
+import java.util.concurrent.ThreadFactory
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.ZipFile
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -48,6 +55,7 @@ class AppSemanticAnalyzer @Inject constructor() {
         apkPaths: List<String>,
         cancellationCheck: () -> Unit = {},
         performanceTrace: AppSemanticAnalyzerPerformanceTrace? = null,
+        performanceConfig: SemanticAnalyzerPerformanceConfig = SemanticAnalyzerPerformanceConfig.DEFAULT,
     ): AppSemanticAnalysisResult {
         val summary = MutableSemanticSummary(packageName = packageName)
         performanceTrace.measureOrRun("scan_apks_total") {
@@ -62,6 +70,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                         summary = summary,
                         cancellationCheck = cancellationCheck,
                         performanceTrace = performanceTrace,
+                        performanceConfig = performanceConfig,
                     )
                 }
         }
@@ -152,6 +161,7 @@ class AppSemanticAnalyzer @Inject constructor() {
         summary: MutableSemanticSummary,
         cancellationCheck: () -> Unit,
         performanceTrace: AppSemanticAnalyzerPerformanceTrace?,
+        performanceConfig: SemanticAnalyzerPerformanceConfig,
     ) {
         cancellationCheck()
         val apkFile = File(path)
@@ -177,6 +187,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                                     summary = summary,
                                     cancellationCheck = cancellationCheck,
                                     performanceTrace = performanceTrace,
+                                    performanceConfig = performanceConfig,
                                 )
                             }
                             entry.name.endsWith(".so") -> zipFile.getInputStream(entry).use { input ->
@@ -251,6 +262,7 @@ class AppSemanticAnalyzer @Inject constructor() {
         summary: MutableSemanticSummary,
         cancellationCheck: () -> Unit,
         performanceTrace: AppSemanticAnalyzerPerformanceTrace?,
+        performanceConfig: SemanticAnalyzerPerformanceConfig,
     ) {
         cancellationCheck()
         performanceTrace?.count("dex_entry_attempt_count")
@@ -324,58 +336,110 @@ class AppSemanticAnalyzer @Inject constructor() {
         var finalAnalysisMillis = 0L
         performanceTrace.measureOrRun("dex_final_method_analysis") {
             val startedAt = if (collectPerformanceMetrics) System.nanoTime() else 0L
-            classes.forEachIndexed { classIndex, classDef ->
-                if (classIndex % CANCELLATION_CHECK_CLASS_INTERVAL == 0) {
+            collectDexMethodAnalysisOutputs(
+                classes = classes,
+                evidencePrefix = evidencePrefix,
+                summary = summary,
+                appClassPrefixes = appClassPrefixes,
+                semanticSummaries = semanticSummaries,
+                cancellationCheck = cancellationCheck,
+                performanceTrace = performanceTrace,
+                dexMetrics = dexMetrics,
+                performanceConfig = performanceConfig,
+            )
+                .sortedWith(
+                    compareBy<MethodAnalysisOutput> { output -> output.classIndex }
+                        .thenBy { output -> output.methodIndex }
+                        .thenBy { output -> output.order },
+                )
+                .forEach { output ->
+                    output.nativeBridgeCandidates.forEach(summary::addNativeBridgeCandidate)
+                    output.facts.forEach(summary::addFact)
+                    output.semantics?.let { semantics ->
+                        mergeMethodSemantics(
+                            semantics = semantics,
+                            summary = summary,
+                            collectPerformanceMetrics = collectPerformanceMetrics,
+                            performanceTrace = performanceTrace,
+                            dexMetrics = dexMetrics,
+                        )
+                    }
+                }
+            if (collectPerformanceMetrics) {
+                finalAnalysisMillis = elapsedMillis(startedAt)
+            }
+        }
+        dexMetrics?.finalAnalysisMillis = finalAnalysisMillis
+        dexMetrics?.durationMillis = elapsedMillis(dexStartedAt)
+        dexMetrics?.toTraceMetrics()?.let(performanceTrace::recordDexEntry)
+    }
+
+    private fun collectDexMethodAnalysisOutputs(
+        classes: List<ClassDef>,
+        evidencePrefix: String,
+        summary: MutableSemanticSummary,
+        appClassPrefixes: Set<String>,
+        semanticSummaries: DexSemanticSummaries,
+        cancellationCheck: () -> Unit,
+        performanceTrace: AppSemanticAnalyzerPerformanceTrace?,
+        dexMetrics: MutableDexEntryMetrics?,
+        performanceConfig: SemanticAnalyzerPerformanceConfig,
+    ): List<MethodAnalysisOutput> {
+        val outputs = mutableListOf<MethodAnalysisOutput>()
+        val tasks = mutableListOf<MethodAnalysisTask>()
+        classes.forEachIndexed { classIndex, classDef ->
+            if (classIndex % CANCELLATION_CHECK_CLASS_INTERVAL == 0) {
+                cancellationCheck()
+            }
+            val className = dexTypeName(classDef.type)
+            val scope = scopeForClass(
+                className = className,
+                packageName = summary.packageName,
+                appClassPrefixes = appClassPrefixes,
+            )
+            if (scope == AppSemanticRiskScope.SDK_CODE && shouldSkipSdkInfrastructureClass(className)) {
+                performanceTrace?.count("final_classes_skipped_sdk_infra")
+                dexMetrics?.finalClassesSkippedSdkInfra = dexMetrics.finalClassesSkippedSdkInfra.plus(1L)
+                if (performanceTrace != null) {
+                    var skippedMethods = 0L
+                    classDef.methods.forEach { method ->
+                        if (method.implementation != null) skippedMethods += 1
+                    }
+                    performanceTrace.count("final_methods_skipped_sdk_infra", skippedMethods)
+                    dexMetrics?.finalMethodsSkippedSdkInfra = dexMetrics.finalMethodsSkippedSdkInfra.plus(skippedMethods)
+                }
+                return@forEachIndexed
+            }
+            performanceTrace?.count("final_classes_visited")
+            dexMetrics?.finalClassesVisited = dexMetrics.finalClassesVisited.plus(1L)
+            val source = when (scope) {
+                AppSemanticRiskScope.APP_CODE -> AppSemanticEvidenceSource.DIRECT_APP_CODE
+                AppSemanticRiskScope.SDK_CODE -> AppSemanticEvidenceSource.SDK
+                AppSemanticRiskScope.NATIVE_CODE -> AppSemanticEvidenceSource.NATIVE
+                AppSemanticRiskScope.MANIFEST -> AppSemanticEvidenceSource.MANIFEST_ONLY
+                AppSemanticRiskScope.CROSS_LAYER -> AppSemanticEvidenceSource.APP_TO_SDK
+            }
+
+            classDef.methods.forEachIndexed { methodIndex, method ->
+                if (methodIndex % CANCELLATION_CHECK_METHOD_INTERVAL == 0) {
                     cancellationCheck()
                 }
-                val className = dexTypeName(classDef.type)
-                val scope = scopeForClass(
-                    className = className,
-                    packageName = summary.packageName,
-                    appClassPrefixes = appClassPrefixes,
-                )
-                if (scope == AppSemanticRiskScope.SDK_CODE && shouldSkipSdkInfrastructureClass(className)) {
-                    performanceTrace?.count("final_classes_skipped_sdk_infra")
-                    dexMetrics?.finalClassesSkippedSdkInfra = dexMetrics?.finalClassesSkippedSdkInfra?.plus(1L) ?: 1L
-                    if (performanceTrace != null) {
-                        var skippedMethods = 0L
-                        classDef.methods.forEach { method ->
-                            if (method.implementation != null) skippedMethods += 1
-                        }
-                        performanceTrace.count("final_methods_skipped_sdk_infra", skippedMethods)
-                        dexMetrics?.finalMethodsSkippedSdkInfra =
-                            dexMetrics?.finalMethodsSkippedSdkInfra?.plus(skippedMethods) ?: skippedMethods
-                    }
-                    return@forEachIndexed
-                }
-                performanceTrace?.count("final_classes_visited")
-                dexMetrics?.finalClassesVisited = dexMetrics?.finalClassesVisited?.plus(1L) ?: 1L
-                val source = when (scope) {
-                    AppSemanticRiskScope.APP_CODE -> AppSemanticEvidenceSource.DIRECT_APP_CODE
-                    AppSemanticRiskScope.SDK_CODE -> AppSemanticEvidenceSource.SDK
-                    AppSemanticRiskScope.NATIVE_CODE -> AppSemanticEvidenceSource.NATIVE
-                    AppSemanticRiskScope.MANIFEST -> AppSemanticEvidenceSource.MANIFEST_ONLY
-                    AppSemanticRiskScope.CROSS_LAYER -> AppSemanticEvidenceSource.APP_TO_SDK
-                }
-
-                classDef.methods.forEachIndexed { methodIndex, method ->
-                    if (methodIndex % CANCELLATION_CHECK_METHOD_INTERVAL == 0) {
-                        cancellationCheck()
-                    }
-                    val methodName = methodNameWithParameters(method.name, method.parameterTypes)
-                    val evidence = "$evidencePrefix:$className#${method.name}"
-                    if (method.isNativeDeclaration()) {
-                        summary.addNativeBridgeCandidate(
-                            NativeBridgeCandidate(
-                                scope = scope,
-                                source = source,
-                                className = className,
-                                methodName = methodName,
-                                simpleMethodName = method.name,
-                                evidence = "$evidence -> native declaration",
-                            ),
-                        )
-                        summary.addFact(
+                val methodName = methodNameWithParameters(method.name, method.parameterTypes)
+                val evidence = "$evidencePrefix:$className#${method.name}"
+                if (method.isNativeDeclaration()) {
+                    val candidate = NativeBridgeCandidate(
+                        scope = scope,
+                        source = source,
+                        className = className,
+                        methodName = methodName,
+                        simpleMethodName = method.name,
+                        evidence = "$evidence -> native declaration",
+                    )
+                    outputs += MethodAnalysisOutput(
+                        classIndex = classIndex,
+                        methodIndex = methodIndex,
+                        order = METHOD_ANALYSIS_ORDER_NATIVE_DECLARATION,
+                        facts = listOf(
                             fact(
                                 kind = SemanticFactKind.NATIVE_METHOD_DECLARATION,
                                 scope = scope,
@@ -385,91 +449,238 @@ class AppSemanticAnalyzer @Inject constructor() {
                                 className = className,
                                 methodName = methodName,
                             ),
-                        )
-                    }
-                    val implementation = method.implementation ?: return@forEachIndexed
-                    val semantics = analyzeMethod(
-                        evidence = evidence,
-                        className = className,
-                        methodName = methodName,
-                        packageName = summary.packageName,
-                        appClassPrefixes = appClassPrefixes,
-                        semanticSummaries = semanticSummaries,
-                        scope = scope,
-                        source = source,
-                        instructions = implementation.instructions,
-                        cancellationCheck = cancellationCheck,
-                        performanceTrace = performanceTrace,
+                        ),
+                        nativeBridgeCandidates = listOf(candidate),
                     )
-                    summary.methodsAnalyzed += 1
-                    if (collectPerformanceMetrics) {
-                        performanceTrace?.count("final_methods_analyzed")
-                        dexMetrics?.finalMethodsAnalyzed = dexMetrics?.finalMethodsAnalyzed?.plus(1L) ?: 1L
-                        dexMetrics?.instructionsVisitedFinal =
-                            dexMetrics?.instructionsVisitedFinal?.plus(semantics.instructionsVisited.toLong())
-                                ?: semantics.instructionsVisited.toLong()
-                        dexMetrics?.invokeInstructionsFinal =
-                            dexMetrics?.invokeInstructionsFinal?.plus(semantics.invokeInstructionCount.toLong())
-                                ?: semantics.invokeInstructionCount.toLong()
-                        dexMetrics?.handleInvokeCalls =
-                            dexMetrics?.handleInvokeCalls?.plus(semantics.handleInvokeCount.toLong())
-                                ?: semantics.handleInvokeCount.toLong()
-                        dexMetrics?.handleInvokeNanosFinal =
-                            dexMetrics?.handleInvokeNanosFinal?.plus(semantics.handleInvokeNanos)
-                                ?: semantics.handleInvokeNanos
-                        dexMetrics?.instructionEvidenceBuildsFinal =
-                            dexMetrics?.instructionEvidenceBuildsFinal
-                                ?.plus(semantics.instructionEvidenceBuildCount.toLong())
-                                ?: semantics.instructionEvidenceBuildCount.toLong()
-                        dexMetrics?.registerListCallsFinal =
-                            dexMetrics?.registerListCallsFinal?.plus(semantics.registerListCallCount.toLong())
-                                ?: semantics.registerListCallCount.toLong()
-                        dexMetrics?.methodSignatureWithArgumentsCallsFinal =
-                            dexMetrics?.methodSignatureWithArgumentsCallsFinal
-                                ?.plus(semantics.methodSignatureWithArgumentsCallCount.toLong())
-                                ?: semantics.methodSignatureWithArgumentsCallCount.toLong()
-                        dexMetrics?.methodSignatureWithArgumentsNanosFinal =
-                            dexMetrics?.methodSignatureWithArgumentsNanosFinal
-                                ?.plus(semantics.methodSignatureWithArgumentsNanos)
-                                ?: semantics.methodSignatureWithArgumentsNanos
-                        dexMetrics?.methodCallCandidatesFinal =
-                            dexMetrics?.methodCallCandidatesFinal?.plus(semantics.methodCallCandidates.toLong())
-                                ?: semantics.methodCallCandidates.toLong()
-                        dexMetrics?.methodCallsDiscardedFinal =
-                            dexMetrics?.methodCallsDiscardedFinal?.plus(semantics.methodCallsDiscarded.toLong())
-                                ?: semantics.methodCallsDiscarded.toLong()
-                        dexMetrics?.methodCallsDiscardedPlatformFinal =
-                            dexMetrics?.methodCallsDiscardedPlatformFinal
-                                ?.plus(semantics.methodCallsDiscardedPlatform.toLong())
-                                ?: semantics.methodCallsDiscardedPlatform.toLong()
-                        dexMetrics?.methodCallsDiscardedBlankTargetFinal =
-                            dexMetrics?.methodCallsDiscardedBlankTargetFinal
-                                ?.plus(semantics.methodCallsDiscardedBlankTarget.toLong())
-                                ?: semantics.methodCallsDiscardedBlankTarget.toLong()
-                        if (semantics.hasCfg) {
-                            dexMetrics?.methodsWithCfg = dexMetrics?.methodsWithCfg?.plus(1L) ?: 1L
-                        }
-                        dexMetrics?.factsEmittedFinal =
-                            dexMetrics?.factsEmittedFinal?.plus(semantics.facts.size.toLong())
-                                ?: semantics.facts.size.toLong()
-                        dexMetrics?.methodCallsRetainedFinal =
-                            dexMetrics?.methodCallsRetainedFinal?.plus(semantics.calls.size.toLong())
-                                ?: semantics.calls.size.toLong()
-                    }
-                    summary.cfgNodeCount += semantics.cfgNodes
-                    summary.cfgEdgeCount += semantics.cfgEdges
-                    summary.dfgEdgeCount += semantics.dfgEdges
-                    semantics.facts.forEach(summary::addFact)
-                    semantics.calls.forEach(summary::addMethodCall)
                 }
-            }
-            if (collectPerformanceMetrics) {
-                finalAnalysisMillis = elapsedMillis(startedAt)
+                val implementation = method.implementation ?: return@forEachIndexed
+                tasks += MethodAnalysisTask(
+                    classIndex = classIndex,
+                    methodIndex = methodIndex,
+                    className = className,
+                    methodName = methodName,
+                    evidence = evidence,
+                    scope = scope,
+                    source = source,
+                    instructions = implementation.instructions,
+                )
             }
         }
-        dexMetrics?.finalAnalysisMillis = finalAnalysisMillis
-        dexMetrics?.durationMillis = elapsedMillis(dexStartedAt)
-        dexMetrics?.toTraceMetrics()?.let(performanceTrace::recordDexEntry)
+
+        outputs += analyzeMethodTasks(
+            tasks = tasks,
+            packageName = summary.packageName,
+            appClassPrefixes = appClassPrefixes,
+            semanticSummaries = semanticSummaries,
+            cancellationCheck = cancellationCheck,
+            performanceTrace = performanceTrace,
+            performanceConfig = performanceConfig,
+        )
+        return outputs
+    }
+
+    private fun analyzeMethodTasks(
+        tasks: List<MethodAnalysisTask>,
+        packageName: String,
+        appClassPrefixes: Set<String>,
+        semanticSummaries: DexSemanticSummaries,
+        cancellationCheck: () -> Unit,
+        performanceTrace: AppSemanticAnalyzerPerformanceTrace?,
+        performanceConfig: SemanticAnalyzerPerformanceConfig,
+    ): List<MethodAnalysisOutput> {
+        if (tasks.isEmpty()) return emptyList()
+        if (
+            performanceConfig.maxHelperPermits <= 0 ||
+            performanceConfig.maxHelpersPerApp <= 0 ||
+            tasks.size < MIN_PARALLEL_METHOD_ANALYSIS_TASKS
+        ) {
+            return tasks.map { task ->
+                analyzeMethodTask(
+                    task = task,
+                    packageName = packageName,
+                    appClassPrefixes = appClassPrefixes,
+                    semanticSummaries = semanticSummaries,
+                    cancellationCheck = cancellationCheck,
+                    performanceTrace = performanceTrace,
+                )
+            }
+        }
+        val appSlotLimiter = methodAnalysisAppSlotLimiter(performanceConfig.maxParallelMethodAnalysisApps)
+        if (!appSlotLimiter.tryAcquire()) {
+            performanceTrace?.count("final_method_parallel_slot_misses")
+            return tasks.map { task ->
+                analyzeMethodTask(
+                    task = task,
+                    packageName = packageName,
+                    appClassPrefixes = appClassPrefixes,
+                    semanticSummaries = semanticSummaries,
+                    cancellationCheck = cancellationCheck,
+                    performanceTrace = performanceTrace,
+                )
+            }
+        }
+
+        val helperLimiter = methodAnalysisHelperLimiter(performanceConfig.maxHelperPermits)
+        val helperCount = helperLimiter.tryAcquireUpTo(performanceConfig.maxHelpersPerApp)
+        if (helperCount == 0) {
+            appSlotLimiter.release()
+            performanceTrace?.count("final_method_parallel_helper_misses")
+            return tasks.map { task ->
+                analyzeMethodTask(
+                    task = task,
+                    packageName = packageName,
+                    appClassPrefixes = appClassPrefixes,
+                    semanticSummaries = semanticSummaries,
+                    cancellationCheck = cancellationCheck,
+                    performanceTrace = performanceTrace,
+                )
+            }
+        }
+
+        return try {
+            performanceTrace?.count("final_method_parallel_slot_hits")
+            performanceTrace?.count("final_method_parallel_helpers", helperCount.toLong())
+            performanceTrace?.count("final_method_parallel_max_helper_permits", performanceConfig.maxHelperPermits.toLong())
+            performanceTrace?.count("final_method_parallel_profile_${performanceConfig.profile.name.lowercase()}")
+            performanceTrace?.count("final_method_parallel_tasks", tasks.size.toLong())
+            val chunks = tasks.chunked(METHOD_ANALYSIS_CHUNK_SIZE)
+            performanceTrace?.count("final_method_parallel_chunks", chunks.size.toLong())
+            val nextChunkIndex = AtomicInteger(0)
+
+            fun analyzeNextChunks(): List<MethodAnalysisOutput> {
+                val outputs = mutableListOf<MethodAnalysisOutput>()
+                while (true) {
+                    cancellationCheck()
+                    val chunkIndex = nextChunkIndex.getAndIncrement()
+                    if (chunkIndex >= chunks.size) break
+                    chunks[chunkIndex].forEach { task ->
+                        outputs += analyzeMethodTask(
+                            task = task,
+                            packageName = packageName,
+                            appClassPrefixes = appClassPrefixes,
+                            semanticSummaries = semanticSummaries,
+                            cancellationCheck = cancellationCheck,
+                            performanceTrace = performanceTrace,
+                        )
+                    }
+                }
+                return outputs
+            }
+
+            val helperFutures = (0 until helperCount).map {
+                METHOD_ANALYSIS_EXECUTOR.submit(Callable { analyzeNextChunks() })
+            }
+            try {
+                analyzeNextChunks() + helperFutures.flatMap { future -> future.getMethodOutputs() }
+            } catch (error: Throwable) {
+                helperFutures.forEach { future -> future.cancel(true) }
+                throw error
+            }
+        } finally {
+            helperLimiter.release(helperCount)
+            appSlotLimiter.release()
+        }
+    }
+
+    private fun Future<List<MethodAnalysisOutput>>.getMethodOutputs(): List<MethodAnalysisOutput> {
+        return try {
+            get()
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw CancellationException("Interrupted during semantic method analysis")
+        } catch (error: ExecutionException) {
+            val cause = error.cause ?: error
+            when (cause) {
+                is CancellationException -> throw cause
+                is RuntimeException -> throw cause
+                is Error -> throw cause
+                else -> throw IllegalStateException(cause)
+            }
+        }
+    }
+
+    private fun methodAnalysisAppSlotLimiter(maxParallelApps: Int): Semaphore {
+        val permits = maxParallelApps.coerceAtLeast(1)
+        return METHOD_ANALYSIS_APP_SLOT_LIMITERS.getOrPut(permits) { Semaphore(permits, true) }
+    }
+
+    private fun methodAnalysisHelperLimiter(maxHelperPermits: Int): Semaphore {
+        val permits = maxHelperPermits.coerceIn(1, MAX_FINAL_METHOD_ANALYSIS_HELPER_THREADS)
+        return METHOD_ANALYSIS_HELPER_LIMITERS.getOrPut(permits) { Semaphore(permits, true) }
+    }
+
+    private fun Semaphore.tryAcquireUpTo(maxPermits: Int): Int {
+        val permits = maxPermits.coerceAtLeast(0)
+        var acquired = 0
+        while (acquired < permits && tryAcquire()) {
+            acquired += 1
+        }
+        return acquired
+    }
+
+    private fun analyzeMethodTask(
+        task: MethodAnalysisTask,
+        packageName: String,
+        appClassPrefixes: Set<String>,
+        semanticSummaries: DexSemanticSummaries,
+        cancellationCheck: () -> Unit,
+        performanceTrace: AppSemanticAnalyzerPerformanceTrace?,
+    ): MethodAnalysisOutput {
+        val semantics = analyzeMethod(
+            evidence = task.evidence,
+            className = task.className,
+            methodName = task.methodName,
+            packageName = packageName,
+            appClassPrefixes = appClassPrefixes,
+            semanticSummaries = semanticSummaries,
+            scope = task.scope,
+            source = task.source,
+            instructions = task.instructions,
+            cancellationCheck = cancellationCheck,
+            performanceTrace = performanceTrace,
+        )
+        return MethodAnalysisOutput(
+            classIndex = task.classIndex,
+            methodIndex = task.methodIndex,
+            order = METHOD_ANALYSIS_ORDER_SEMANTICS,
+            semantics = semantics,
+        )
+    }
+
+    private fun mergeMethodSemantics(
+        semantics: MethodSemanticResult,
+        summary: MutableSemanticSummary,
+        collectPerformanceMetrics: Boolean,
+        performanceTrace: AppSemanticAnalyzerPerformanceTrace?,
+        dexMetrics: MutableDexEntryMetrics?,
+    ) {
+        summary.methodsAnalyzed += 1
+        if (collectPerformanceMetrics) {
+            performanceTrace?.count("final_methods_analyzed")
+            dexMetrics?.finalMethodsAnalyzed = dexMetrics.finalMethodsAnalyzed.plus(1L)
+            dexMetrics?.instructionsVisitedFinal = dexMetrics.instructionsVisitedFinal.plus(semantics.instructionsVisited.toLong())
+            dexMetrics?.invokeInstructionsFinal = dexMetrics.invokeInstructionsFinal.plus(semantics.invokeInstructionCount.toLong())
+            dexMetrics?.handleInvokeCalls = dexMetrics.handleInvokeCalls.plus(semantics.handleInvokeCount.toLong())
+            dexMetrics?.handleInvokeNanosFinal = dexMetrics.handleInvokeNanosFinal.plus(semantics.handleInvokeNanos)
+            dexMetrics?.instructionEvidenceBuildsFinal = dexMetrics.instructionEvidenceBuildsFinal.plus(semantics.instructionEvidenceBuildCount.toLong())
+            dexMetrics?.registerListCallsFinal = dexMetrics.registerListCallsFinal.plus(semantics.registerListCallCount.toLong())
+            dexMetrics?.methodSignatureWithArgumentsCallsFinal = dexMetrics.methodSignatureWithArgumentsCallsFinal.plus(semantics.methodSignatureWithArgumentsCallCount.toLong())
+            dexMetrics?.methodSignatureWithArgumentsNanosFinal = dexMetrics.methodSignatureWithArgumentsNanosFinal.plus(semantics.methodSignatureWithArgumentsNanos)
+            dexMetrics?.methodCallCandidatesFinal = dexMetrics.methodCallCandidatesFinal.plus(semantics.methodCallCandidates.toLong())
+            dexMetrics?.methodCallsDiscardedFinal = dexMetrics.methodCallsDiscardedFinal.plus(semantics.methodCallsDiscarded.toLong())
+            dexMetrics?.methodCallsDiscardedPlatformFinal = dexMetrics.methodCallsDiscardedPlatformFinal.plus(semantics.methodCallsDiscardedPlatform.toLong())
+            dexMetrics?.methodCallsDiscardedBlankTargetFinal = dexMetrics.methodCallsDiscardedBlankTargetFinal.plus(semantics.methodCallsDiscardedBlankTarget.toLong())
+            if (semantics.hasCfg) {
+                dexMetrics?.methodsWithCfg = dexMetrics.methodsWithCfg.plus(1L)
+            }
+            dexMetrics?.factsEmittedFinal = dexMetrics.factsEmittedFinal.plus(semantics.facts.size.toLong())
+            dexMetrics?.methodCallsRetainedFinal = dexMetrics.methodCallsRetainedFinal.plus(semantics.calls.size.toLong())
+        }
+        summary.cfgNodeCount += semantics.cfgNodes
+        summary.cfgEdgeCount += semantics.cfgEdges
+        summary.dfgEdgeCount += semantics.dfgEdges
+        semantics.facts.forEach(summary::addFact)
+        semantics.calls.forEach(summary::addMethodCall)
     }
 
     private fun scanNativeEntry(
@@ -678,22 +889,17 @@ class AppSemanticAnalyzer @Inject constructor() {
             performanceTrace?.count("register_reads_summary", iterationRegisterReads)
             performanceTrace?.count("summary_iteration_${iteration + 1}_register_reads", iterationRegisterReads)
             performanceTrace?.count("summary_iterations_executed")
-            dexMetrics?.summaryMethodsVisited =
-                dexMetrics?.summaryMethodsVisited?.plus(iterationMethodsVisited) ?: iterationMethodsVisited
-            dexMetrics?.summaryInstructionsVisited =
-                dexMetrics?.summaryInstructionsVisited?.plus(iterationInstructionsVisited) ?: iterationInstructionsVisited
-            dexMetrics?.summaryIterationsExecuted =
-                dexMetrics?.summaryIterationsExecuted?.plus(1L) ?: 1L
+            dexMetrics?.summaryMethodsVisited = dexMetrics.summaryMethodsVisited.plus(iterationMethodsVisited)
+            dexMetrics?.summaryInstructionsVisited = dexMetrics.summaryInstructionsVisited.plus(iterationInstructionsVisited)
+            dexMetrics?.summaryIterationsExecuted = dexMetrics.summaryIterationsExecuted.plus(1L)
             if (changed) {
                 performanceTrace?.count("summary_iterations_changed")
                 performanceTrace?.count("summary_iteration_${iteration + 1}_changed")
-                dexMetrics?.summaryIterationsChanged =
-                    dexMetrics?.summaryIterationsChanged?.plus(1L) ?: 1L
+                dexMetrics?.summaryIterationsChanged = dexMetrics.summaryIterationsChanged.plus(1L)
             } else {
                 performanceTrace?.count("summary_iterations_no_change")
                 performanceTrace?.count("summary_iteration_${iteration + 1}_no_change")
-                dexMetrics?.summaryIterationsNoChange =
-                    dexMetrics?.summaryIterationsNoChange?.plus(1L) ?: 1L
+                dexMetrics?.summaryIterationsNoChange = dexMetrics.summaryIterationsNoChange.plus(1L)
             }
             if (!changed) break
         }
@@ -724,6 +930,14 @@ class AppSemanticAnalyzer @Inject constructor() {
         fun tagRegister(
             register: Int,
             vararg tags: DataTag,
+        ) {
+            if (tags.isEmpty()) return
+            registerTags.getOrPut(register) { mutableSetOf() }.addAll(tags)
+        }
+
+        fun tagRegister(
+            register: Int,
+            tags: Collection<DataTag>,
         ) {
             if (tags.isEmpty()) return
             registerTags.getOrPut(register) { mutableSetOf() }.addAll(tags)
@@ -774,7 +988,7 @@ class AppSemanticAnalyzer @Inject constructor() {
             if (opcode.startsWith("move-result")) {
                 val register = (instruction as? OneRegisterInstruction)?.registerA
                 if (register != null && pendingResultTags.isNotEmpty()) {
-                    tagRegister(register, *pendingResultTags.toTypedArray())
+                    tagRegister(register, pendingResultTags)
                 }
                 pendingResultTags = emptySet()
                 return@forEach
@@ -782,9 +996,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                 pendingResultTags = emptySet()
             }
 
-            val reference = runCatching {
-                (instruction as? ReferenceInstruction)?.reference
-            }.getOrNull()
+            val reference = (instruction as? ReferenceInstruction)?.reference
 
             if (isConstStringOpcode(opcode) && reference is StringReference) {
                 val register = (instruction as? OneRegisterInstruction)?.registerA
@@ -793,7 +1005,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                     registerStrings[register] = reference.string
                     textTags(reference.string).forEach { tag -> tagRegister(register, tag) }
                     if (branchDerivedCountdown > 0 && branchDerivedTags.isNotEmpty()) {
-                        tagRegister(register, *branchDerivedTags.toTypedArray())
+                        tagRegister(register, branchDerivedTags)
                     }
                 }
             }
@@ -805,7 +1017,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                     clearRegister(register)
                     registerInts[register] = literal
                     if (branchDerivedCountdown > 0 && branchDerivedTags.isNotEmpty()) {
-                        tagRegister(register, *branchDerivedTags.toTypedArray())
+                        tagRegister(register, branchDerivedTags)
                     }
                 }
             }
@@ -822,7 +1034,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                         if (register != null) {
                             clearRegister(register)
                             if (fieldTags.isNotEmpty()) {
-                                tagRegister(register, *fieldTags.toTypedArray())
+                                tagRegister(register, fieldTags)
                             }
                         }
                     }
@@ -861,7 +1073,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                     argumentRegisters = argumentRegisters,
                     argumentTagsByIndex = argumentTagsByIndex,
                     constructorParameterFields = summaries.constructorParameterFields,
-                    tagRegister = { register, tags -> tagRegister(register, *tags.toTypedArray()) },
+                    tagRegister = { register, tags -> tagRegister(register, tags) },
                     addFieldTags = { field, tags ->
                         learnedFieldTags.getOrPut(field) { mutableSetOf() }.addAll(tags)
                     },
@@ -888,7 +1100,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                 if (movedTags != null) {
                     val (destination, sourceRegister) = movedTags
                     clearRegister(destination)
-                    registerTags[sourceRegister]?.let { tags -> tagRegister(destination, *tags.toTypedArray()) }
+                    registerTags[sourceRegister]?.let { tags -> tagRegister(destination, tags) }
                     registerStrings[sourceRegister]?.let { value -> registerStrings[destination] = value }
                     registerInts[sourceRegister]?.let { value -> registerInts[destination] = value }
                 } else {
@@ -990,6 +1202,14 @@ class AppSemanticAnalyzer @Inject constructor() {
             registerTags.getOrPut(register) { mutableSetOf() }.addAll(tags)
         }
 
+        fun tagRegister(
+            register: Int,
+            tags: Collection<DataTag>,
+        ) {
+            if (tags.isEmpty()) return
+            registerTags.getOrPut(register) { mutableSetOf() }.addAll(tags)
+        }
+
         fun clearRegister(register: Int) {
             registerTags.remove(register)
             registerStrings.remove(register)
@@ -1057,7 +1277,7 @@ class AppSemanticAnalyzer @Inject constructor() {
             if (opcode.startsWith("move-result")) {
                 val register = (instruction as? OneRegisterInstruction)?.registerA
                 if (register != null && pendingResultTags.isNotEmpty()) {
-                    tagRegister(register, *pendingResultTags.toTypedArray())
+                    tagRegister(register, pendingResultTags)
                     dfgEdges += pendingResultTags.size
                 }
                 pendingResultTags = emptySet()
@@ -1066,9 +1286,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                 pendingResultTags = emptySet()
             }
 
-            val reference = runCatching {
-                (instruction as? ReferenceInstruction)?.reference
-            }.getOrNull()
+            val reference = (instruction as? ReferenceInstruction)?.reference
             if (reference != null) {
                 if (collectPerformanceMetrics) {
                     referenceInstructionCount += 1
@@ -1082,7 +1300,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                     registerStrings[register] = reference.string
                     textTags(reference.string).forEach { tag -> tagRegister(register, tag) }
                     if (branchDerivedCountdown > 0 && branchDerivedTags.isNotEmpty()) {
-                        tagRegister(register, *branchDerivedTags.toTypedArray())
+                        tagRegister(register, branchDerivedTags)
                         dfgEdges += branchDerivedTags.size
                     }
                 }
@@ -1095,7 +1313,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                     clearRegister(register)
                     registerInts[register] = literal
                     if (branchDerivedCountdown > 0 && branchDerivedTags.isNotEmpty()) {
-                        tagRegister(register, *branchDerivedTags.toTypedArray())
+                        tagRegister(register, branchDerivedTags)
                         dfgEdges += branchDerivedTags.size
                     }
                 }
@@ -1123,7 +1341,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                         if (register != null) {
                             clearRegister(register)
                             if (fieldTags.isNotEmpty()) {
-                                tagRegister(register, *fieldTags.toTypedArray())
+                                tagRegister(register, fieldTags)
                                 dfgEdges += fieldTags.size
                                 if (fieldTags.any { it.isVpnOrProxyData() }) {
                                     addFact(
@@ -1241,7 +1459,11 @@ class AppSemanticAnalyzer @Inject constructor() {
                         addFact = ::addFact,
                         tagRegister = ::tagRegister,
                     )?.let { edges -> dfgEdges += edges }
-                    pendingResultTags = invokeSemantics.resultTags + summaryTags
+                    pendingResultTags = when {
+                        invokeSemantics.resultTags.isEmpty() -> summaryTags
+                        summaryTags.isEmpty() -> invokeSemantics.resultTags
+                        else -> invokeSemantics.resultTags + summaryTags
+                    }
                     dfgEdges += invokeSemantics.dfgEdges
 
                     if (
@@ -1276,7 +1498,7 @@ class AppSemanticAnalyzer @Inject constructor() {
                     val (destination, sourceRegister) = movedTags
                     clearRegister(destination)
                     registerTags[sourceRegister]?.let { tags ->
-                        tagRegister(destination, *tags.toTypedArray())
+                        tagRegister(destination, tags)
                         dfgEdges += tags.size
                     }
                     registerStrings[sourceRegister]?.let { value -> registerStrings[destination] = value }
@@ -1296,7 +1518,7 @@ class AppSemanticAnalyzer @Inject constructor() {
         val hasCfg = facts.isNotEmpty()
         val cfg = if (hasCfg) {
             if (collectPerformanceMetrics) {
-                performanceTrace?.count("methods_with_cfg")
+                performanceTrace.count("methods_with_cfg")
             }
             buildCfg(instructions.toList())
         } else {
@@ -1313,31 +1535,31 @@ class AppSemanticAnalyzer @Inject constructor() {
             )
         }
         if (collectPerformanceMetrics) {
-            performanceTrace?.count("instructions_visited_final", instructionsVisited.toLong())
-            performanceTrace?.count("reference_instructions_final", referenceInstructionCount.toLong())
-            performanceTrace?.count("invoke_instructions_final", invokeInstructionCount.toLong())
-            performanceTrace?.count("handle_invoke_calls", handleInvokeCount.toLong())
-            performanceTrace?.count("handle_invoke_skipped_semantics_final", handleInvokeSkippedSemantics.toLong())
-            performanceTrace?.count("handle_invoke_nanos_final", handleInvokeNanos)
-            performanceTrace?.count("instruction_evidence_builds_final", instructionEvidenceBuilder.buildCount.toLong())
-            performanceTrace?.count("register_list_calls_final", registerListCallCount.toLong())
-            performanceTrace?.count("method_signature_with_arguments_calls_final", methodSignatureWithArgumentsCallCount.toLong())
-            performanceTrace?.count("method_signature_with_arguments_nanos_final", methodSignatureWithArgumentsNanos)
-            performanceTrace?.count("method_call_candidates_final", methodCallCandidates.toLong())
-            performanceTrace?.count("method_calls_discarded_final", methodCallsDiscarded.toLong())
-            performanceTrace?.count("method_calls_discarded_platform_final", methodCallsDiscardedPlatform.toLong())
-            performanceTrace?.count("method_calls_discarded_blank_target_final", methodCallsDiscardedBlankTarget.toLong())
-            performanceTrace?.count("opcode_key_calls_final", opcodeKeyCallCount.toLong())
-            performanceTrace?.count("register_list_objects_built_final", 0L)
-            performanceTrace?.count("argument_tags_built_final", argumentTagsBuilt.toLong())
-            performanceTrace?.count("argument_strings_built_final", argumentStringsBuilt.toLong())
-            performanceTrace?.count("argument_ints_built_final", argumentIntsBuilt.toLong())
-            performanceTrace?.count("argument_tags_by_index_built_final", argumentTagsByIndexBuilt.toLong())
-            performanceTrace?.count("facts_emitted_final", facts.size.toLong())
-            performanceTrace?.count("method_calls_retained_final", methodCalls.size.toLong())
-            performanceTrace?.count("method_call_objects_retained_final", methodCalls.size.toLong())
+            performanceTrace.count("instructions_visited_final", instructionsVisited.toLong())
+            performanceTrace.count("reference_instructions_final", referenceInstructionCount.toLong())
+            performanceTrace.count("invoke_instructions_final", invokeInstructionCount.toLong())
+            performanceTrace.count("handle_invoke_calls", handleInvokeCount.toLong())
+            performanceTrace.count("handle_invoke_skipped_semantics_final", handleInvokeSkippedSemantics.toLong())
+            performanceTrace.count("handle_invoke_nanos_final", handleInvokeNanos)
+            performanceTrace.count("instruction_evidence_builds_final", instructionEvidenceBuilder.buildCount.toLong())
+            performanceTrace.count("register_list_calls_final", registerListCallCount.toLong())
+            performanceTrace.count("method_signature_with_arguments_calls_final", methodSignatureWithArgumentsCallCount.toLong())
+            performanceTrace.count("method_signature_with_arguments_nanos_final", methodSignatureWithArgumentsNanos)
+            performanceTrace.count("method_call_candidates_final", methodCallCandidates.toLong())
+            performanceTrace.count("method_calls_discarded_final", methodCallsDiscarded.toLong())
+            performanceTrace.count("method_calls_discarded_platform_final", methodCallsDiscardedPlatform.toLong())
+            performanceTrace.count("method_calls_discarded_blank_target_final", methodCallsDiscardedBlankTarget.toLong())
+            performanceTrace.count("opcode_key_calls_final", opcodeKeyCallCount.toLong())
+            performanceTrace.count("register_list_objects_built_final", 0L)
+            performanceTrace.count("argument_tags_built_final", argumentTagsBuilt.toLong())
+            performanceTrace.count("argument_strings_built_final", argumentStringsBuilt.toLong())
+            performanceTrace.count("argument_ints_built_final", argumentIntsBuilt.toLong())
+            performanceTrace.count("argument_tags_by_index_built_final", argumentTagsByIndexBuilt.toLong())
+            performanceTrace.count("facts_emitted_final", facts.size.toLong())
+            performanceTrace.count("method_calls_retained_final", methodCalls.size.toLong())
+            performanceTrace.count("method_call_objects_retained_final", methodCalls.size.toLong())
             if (facts.isNotEmpty()) {
-                performanceTrace?.count("methods_with_facts")
+                performanceTrace.count("methods_with_facts")
             }
         }
 
@@ -2132,13 +2354,16 @@ class AppSemanticAnalyzer @Inject constructor() {
         trustedVpnClient: Boolean,
         performanceTrace: AppSemanticAnalyzerPerformanceTrace?,
     ): List<AppSemanticSignal> {
+        val callsByCallerScope = summary.methodCalls.groupBy { it.callerScope }
         return buildScopedCallGraphSignals(
             summary = summary,
+            callerScopedCalls = callsByCallerScope[AppSemanticRiskScope.APP_CODE].orEmpty(),
             trustedVpnClient = trustedVpnClient,
             scope = AppSemanticRiskScope.APP_CODE,
             performanceTrace = performanceTrace,
         ) + buildScopedCallGraphSignals(
             summary = summary,
+            callerScopedCalls = callsByCallerScope[AppSemanticRiskScope.SDK_CODE].orEmpty(),
             trustedVpnClient = trustedVpnClient,
             scope = AppSemanticRiskScope.SDK_CODE,
             performanceTrace = performanceTrace,
@@ -2147,6 +2372,7 @@ class AppSemanticAnalyzer @Inject constructor() {
 
     private fun buildScopedCallGraphSignals(
         summary: MutableSemanticSummary,
+        callerScopedCalls: List<MethodCall>,
         trustedVpnClient: Boolean,
         scope: AppSemanticRiskScope,
         performanceTrace: AppSemanticAnalyzerPerformanceTrace?,
@@ -2169,14 +2395,13 @@ class AppSemanticAnalyzer @Inject constructor() {
         performanceTrace?.count("call_graph_${scope.name.lowercase()}_fact_methods", factsByMethod.size.toLong())
         if (factsByMethod.isEmpty()) return emptyList()
 
-        val scopedCalls = summary.methodCalls
+        val scopedCalls = callerScopedCalls
             .filter { call ->
-                call.callerScope == scope &&
-                    scopeForClass(
-                        className = call.targetClass,
-                        packageName = summary.packageName,
-                        appClassPrefixes = summary.appClassPrefixes,
-                    ) == scope
+                scopeForClass(
+                    className = call.targetClass,
+                    packageName = summary.packageName,
+                    appClassPrefixes = summary.appClassPrefixes,
+                ) == scope
             }
             .groupBy { call ->
                 MethodGroup(
@@ -4019,7 +4244,7 @@ class AppSemanticAnalyzer @Inject constructor() {
         }
 
         val edges = mutableSetOf<Pair<Int, Int>>()
-        leaderList.forEachIndexed { blockIndex, start ->
+        leaderList.forEachIndexed { blockIndex, _ ->
             val endExclusive = leaderList.getOrNull(blockIndex + 1) ?: instructions.size
             val lastIndex = endExclusive - 1
             val lastInstruction = instructions[lastIndex]
@@ -5106,6 +5331,26 @@ class AppSemanticAnalyzer @Inject constructor() {
         val hasCfg: Boolean,
     )
 
+    private data class MethodAnalysisTask(
+        val classIndex: Int,
+        val methodIndex: Int,
+        val className: String,
+        val methodName: String,
+        val evidence: String,
+        val scope: AppSemanticRiskScope,
+        val source: AppSemanticEvidenceSource,
+        val instructions: Iterable<Instruction>,
+    )
+
+    private data class MethodAnalysisOutput(
+        val classIndex: Int,
+        val methodIndex: Int,
+        val order: Int,
+        val semantics: MethodSemanticResult? = null,
+        val facts: List<SemanticFact> = emptyList(),
+        val nativeBridgeCandidates: List<NativeBridgeCandidate> = emptyList(),
+    )
+
     private class InstructionEvidenceBuilder(
         private val methodEvidence: String,
         private val collectPerformanceMetrics: Boolean,
@@ -5272,13 +5517,13 @@ class AppSemanticAnalyzer @Inject constructor() {
         fun firstOrNull(): Int? = if (size == 0) null else values[0]
 
         inline fun forEach(action: (Int) -> Unit) {
-            for (index in 0 until size) {
+            for (index in 0..size) {
                 action(values[index])
             }
         }
 
         inline fun any(predicate: (Int) -> Boolean): Boolean {
-            for (index in 0 until size) {
+            for (index in 0..size) {
                 if (predicate(values[index])) return true
             }
             return false
@@ -5286,7 +5531,7 @@ class AppSemanticAnalyzer @Inject constructor() {
 
         inline fun <T> mapToList(transform: (Int) -> T): List<T> {
             val result = ArrayList<T>(size)
-            for (index in 0 until size) {
+            for (index in 0..size) {
                 result += transform(values[index])
             }
             return result
@@ -5294,7 +5539,7 @@ class AppSemanticAnalyzer @Inject constructor() {
 
         inline fun <T : Any> mapNotNullToList(transform: (Int) -> T?): List<T> {
             val result = ArrayList<T>(size)
-            for (index in 0 until size) {
+            for (index in 0..size) {
                 transform(values[index])?.let(result::add)
             }
             return result
@@ -5615,7 +5860,12 @@ class AppSemanticAnalyzer @Inject constructor() {
         private const val MAX_FORMATTED_INVOKE_ARGUMENT_LENGTH = 96
         private const val MIN_PACKAGE_ENUMERATION_METHOD_COUNT = 3
         private const val MIN_PACKAGE_ENUMERATION_CLASS_COUNT = 5
-        private val DEX_ENTRY_PATTERN = Regex("""classes(?:\d*)\.dex""")
+        private const val MAX_FINAL_METHOD_ANALYSIS_HELPER_THREADS = 4
+        private const val MIN_PARALLEL_METHOD_ANALYSIS_TASKS = 512
+        private const val METHOD_ANALYSIS_CHUNK_SIZE = 256
+        private const val METHOD_ANALYSIS_ORDER_NATIVE_DECLARATION = 0
+        private const val METHOD_ANALYSIS_ORDER_SEMANTICS = 1
+        private val DEX_ENTRY_PATTERN = Regex("""classes\d*\.dex""")
         private const val MAX_TUNNEL_INTERFACE_TEXT_LENGTH = 64
         private val TUNNEL_NAME_TOKEN_PATTERN = Regex("""^(?:(?:tun|ppp|tap|pptp|wg)\d+|ipsec\d+)$""")
         private val TUNNEL_TOKEN_SEPARATOR = Regex("""[^A-Za-z0-9_]+""")
@@ -5638,6 +5888,25 @@ class AppSemanticAnalyzer @Inject constructor() {
             "kotlinx.",
             "org.jetbrains.",
         )
+        private val METHOD_ANALYSIS_APP_SLOT_LIMITERS = ConcurrentHashMap<Int, Semaphore>()
+        private val METHOD_ANALYSIS_HELPER_LIMITERS = ConcurrentHashMap<Int, Semaphore>()
+        private val METHOD_ANALYSIS_EXECUTOR by lazy {
+            Executors.newFixedThreadPool(
+                MAX_FINAL_METHOD_ANALYSIS_HELPER_THREADS,
+                object : ThreadFactory {
+                    private val nextId = AtomicInteger(1)
+
+                    override fun newThread(runnable: Runnable): Thread {
+                        return Thread(
+                            runnable,
+                            "SemanticMethod-${nextId.getAndIncrement()}",
+                        ).apply {
+                            isDaemon = true
+                        }
+                    }
+                },
+            )
+        }
         private val PUBLIC_IP_ENDPOINTS = listOf(
             "ifconfig.me",
             "checkip.amazonaws.com",
@@ -6414,7 +6683,7 @@ class AppSemanticAnalyzer @Inject constructor() {
         )
         private val OPCODE_KEY_CACHE: Map<Opcode, String> =
             EnumMap<Opcode, String>(Opcode::class.java).apply {
-                Opcode.values().forEach { opcode ->
+                Opcode.entries.forEach { opcode ->
                     put(opcode, opcode.name.lowercase().replace('_', '-'))
                 }
             }

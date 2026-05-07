@@ -1,9 +1,6 @@
 package org.debs.mayday.feature.split
 
 import android.os.Bundle
-import android.content.Intent
-import android.net.Uri
-import android.provider.Settings
 import android.view.View
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -45,9 +42,6 @@ class SplitFragment : Fragment() {
                         viewModel.effect.collectLatest { effect ->
                             when (effect) {
                                 SplitUiEffect.NavigateBack -> findNavController().popBackStack()
-                                is SplitUiEffect.OpenAppSettings -> openAppSettings(effect.packageName)
-                                is SplitUiEffect.OpenAppPermissions -> openAppSettings(effect.packageName)
-                                is SplitUiEffect.RequestAppUninstall -> requestAppUninstall(effect.packageName)
                             }
                         }
                     }
@@ -58,21 +52,5 @@ class SplitFragment : Fragment() {
                 }
             }
         }
-    }
-
-    private fun openAppSettings(packageName: String) {
-        val intent = Intent(
-            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-            Uri.fromParts("package", packageName, null),
-        )
-        startActivity(intent)
-    }
-
-    private fun requestAppUninstall(packageName: String) {
-        val intent = Intent(
-            Intent.ACTION_DELETE,
-            Uri.fromParts("package", packageName, null),
-        )
-        startActivity(intent)
     }
 }

@@ -7,6 +7,7 @@ interface SemanticAnalysisRepository {
     suspend fun analyzeApp(
         packageName: String,
         force: Boolean = false,
+        performanceConfig: SemanticAnalyzerPerformanceConfig = SemanticAnalyzerPerformanceConfig.DEFAULT,
     ): AppSemanticAnalysisResult?
 
     suspend fun exportReport(
@@ -21,6 +22,52 @@ interface SemanticAnalysisRepository {
     suspend fun apkSizeBytes(
         packageName: String,
     ): Long?
+}
+
+enum class SemanticScanPerformanceProfile {
+    BALANCED,
+    BACKGROUND_GENTLE,
+    SPEED_DIAGNOSTIC,
+}
+
+data class SemanticAnalyzerPerformanceConfig(
+    val profile: SemanticScanPerformanceProfile,
+    val maxParallelMethodAnalysisApps: Int,
+    val maxHelperPermits: Int,
+    val maxHelpersPerApp: Int,
+) {
+    companion object {
+        val BALANCED = SemanticAnalyzerPerformanceConfig(
+            profile = SemanticScanPerformanceProfile.BALANCED,
+            maxParallelMethodAnalysisApps = 2,
+            maxHelperPermits = 2,
+            maxHelpersPerApp = 1,
+        )
+
+        val BACKGROUND_GENTLE = SemanticAnalyzerPerformanceConfig(
+            profile = SemanticScanPerformanceProfile.BACKGROUND_GENTLE,
+            maxParallelMethodAnalysisApps = 1,
+            maxHelperPermits = 2,
+            maxHelpersPerApp = 1,
+        )
+
+        val SPEED_DIAGNOSTIC = SemanticAnalyzerPerformanceConfig(
+            profile = SemanticScanPerformanceProfile.SPEED_DIAGNOSTIC,
+            maxParallelMethodAnalysisApps = 2,
+            maxHelperPermits = 4,
+            maxHelpersPerApp = 2,
+        )
+
+        val DEFAULT = SPEED_DIAGNOSTIC
+
+        fun forProfile(profile: SemanticScanPerformanceProfile): SemanticAnalyzerPerformanceConfig {
+            return when (profile) {
+                SemanticScanPerformanceProfile.BALANCED -> BALANCED
+                SemanticScanPerformanceProfile.BACKGROUND_GENTLE -> BACKGROUND_GENTLE
+                SemanticScanPerformanceProfile.SPEED_DIAGNOSTIC -> SPEED_DIAGNOSTIC
+            }
+        }
+    }
 }
 
 data class SemanticAnalysisExportItem(

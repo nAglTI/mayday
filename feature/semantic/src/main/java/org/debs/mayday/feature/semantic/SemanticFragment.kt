@@ -1,15 +1,20 @@
 package org.debs.mayday.feature.semantic
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.core.content.FileProvider
@@ -23,6 +28,19 @@ import java.io.File
 class SemanticFragment : Fragment() {
 
     private val viewModel: SemanticViewModel by viewModels()
+    private var pendingScanEvent: SemanticUiEvent? = null
+
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        val event = pendingScanEvent
+        pendingScanEvent = null
+        if (granted && event != null) {
+            viewModel.onEvent(event)
+        } else {
+            viewModel.onEvent(SemanticUiEvent.NotificationPermissionDenied)
+        }
+    }
 
     override fun onResume() {
         super.onResume()
@@ -53,10 +71,37 @@ class SemanticFragment : Fragment() {
                     }
                     SemanticScreen(
                         state = state,
-                        onEvent = viewModel::onEvent,
+                        onEvent = ::onSemanticEvent,
                     )
                 }
             }
+        }
+    }
+
+    private fun onSemanticEvent(event: SemanticUiEvent) {
+        if (event.requiresNotificationPermission() && shouldRequestNotificationPermission()) {
+            pendingScanEvent = event
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
+        }
+        viewModel.onEvent(event)
+    }
+
+    private fun shouldRequestNotificationPermission(): Boolean {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                requireContext(),
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) != PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun SemanticUiEvent.requiresNotificationPermission(): Boolean {
+        return when (this) {
+            SemanticUiEvent.ScanAllClicked,
+            SemanticUiEvent.ScanSelectedClicked,
+            is SemanticUiEvent.ScanAppClicked,
+            -> true
+            else -> false
         }
     }
 
