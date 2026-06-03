@@ -170,41 +170,37 @@ class AppSemanticAnalyzer @Inject constructor() {
         performanceTrace.measureOrRun("manifest_parse") {
             scanManifest(apkFile, summary)
         }
-        try {
-            performanceTrace.measureOrRun("zip_entry_iteration") {
-                ZipFile(apkFile).use { zipFile ->
-                    val entries = zipFile.entries()
-                    while (entries.hasMoreElements()) {
-                        cancellationCheck()
-                        val entry = entries.nextElement()
-                        if (entry.isDirectory) continue
-                        val evidence = "${apkFile.name}!/${entry.name}"
-                        when {
-                            entry.name.matches(DEX_ENTRY_PATTERN) -> zipFile.getInputStream(entry).use { input ->
-                                scanDexEntry(
-                                    input = input,
-                                    evidencePrefix = evidence,
-                                    summary = summary,
-                                    cancellationCheck = cancellationCheck,
-                                    performanceTrace = performanceTrace,
-                                    performanceConfig = performanceConfig,
-                                )
-                            }
-                            entry.name.endsWith(".so") -> zipFile.getInputStream(entry).use { input ->
-                                scanNativeEntry(
-                                    input = input,
-                                    evidencePrefix = evidence,
-                                    summary = summary,
-                                    cancellationCheck = cancellationCheck,
-                                    performanceTrace = performanceTrace,
-                                )
-                            }
+        performanceTrace.measureOrRun("zip_entry_iteration") {
+            ZipFile(apkFile).use { zipFile ->
+                val entries = zipFile.entries()
+                while (entries.hasMoreElements()) {
+                    cancellationCheck()
+                    val entry = entries.nextElement()
+                    if (entry.isDirectory) continue
+                    val evidence = "${apkFile.name}!/${entry.name}"
+                    when {
+                        entry.name.matches(DEX_ENTRY_PATTERN) -> zipFile.getInputStream(entry).use { input ->
+                            scanDexEntry(
+                                input = input,
+                                evidencePrefix = evidence,
+                                summary = summary,
+                                cancellationCheck = cancellationCheck,
+                                performanceTrace = performanceTrace,
+                                performanceConfig = performanceConfig,
+                            )
+                        }
+                        entry.name.endsWith(".so") -> zipFile.getInputStream(entry).use { input ->
+                            scanNativeEntry(
+                                input = input,
+                                evidencePrefix = evidence,
+                                summary = summary,
+                                cancellationCheck = cancellationCheck,
+                                performanceTrace = performanceTrace,
+                            )
                         }
                     }
                 }
             }
-        } catch (error: Throwable) {
-            if (error is CancellationException) throw error
         }
     }
 
@@ -5517,13 +5513,13 @@ class AppSemanticAnalyzer @Inject constructor() {
         fun firstOrNull(): Int? = if (size == 0) null else values[0]
 
         inline fun forEach(action: (Int) -> Unit) {
-            for (index in 0..size) {
+            for (index in 0 until size) {
                 action(values[index])
             }
         }
 
         inline fun any(predicate: (Int) -> Boolean): Boolean {
-            for (index in 0..size) {
+            for (index in 0 until size) {
                 if (predicate(values[index])) return true
             }
             return false
@@ -5531,7 +5527,7 @@ class AppSemanticAnalyzer @Inject constructor() {
 
         inline fun <T> mapToList(transform: (Int) -> T): List<T> {
             val result = ArrayList<T>(size)
-            for (index in 0..size) {
+            for (index in 0 until size) {
                 result += transform(values[index])
             }
             return result
@@ -5539,7 +5535,7 @@ class AppSemanticAnalyzer @Inject constructor() {
 
         inline fun <T : Any> mapNotNullToList(transform: (Int) -> T?): List<T> {
             val result = ArrayList<T>(size)
-            for (index in 0..size) {
+            for (index in 0 until size) {
                 transform(values[index])?.let(result::add)
             }
             return result
@@ -5829,7 +5825,7 @@ class AppSemanticAnalyzer @Inject constructor() {
     }
 
     companion object {
-        const val ANALYZER_VERSION = 14
+        const val ANALYZER_VERSION = 15
         private const val NATIVE_METHOD_ACCESS_FLAG = 0x0100
         private const val STATIC_METHOD_ACCESS_FLAG = 0x0008
         private const val VPN_TRANSPORT_ID = 4L

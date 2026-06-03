@@ -159,6 +159,7 @@ class SemanticScanForegroundService : Service() {
             .setOngoing(state.isRunning)
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setGroup(GROUP_KEY)
             .setProgress(total, scanned, total == 0 && state.isRunning)
         contentIntent?.let(builder::setContentIntent)
         if (state.isRunning) {
@@ -235,6 +236,7 @@ class SemanticScanForegroundService : Service() {
         private const val ACTION_CANCEL = "org.debs.mayday.action.CANCEL_SEMANTIC_SCAN"
         private const val CHANNEL_ID = "mayday.semantic.scan"
         private const val NOTIFICATION_ID = 4050
+        private const val GROUP_KEY = "org.debs.mayday.notification.SEMANTIC_SCAN"
         private const val REQUEST_OPEN_APP = 4051
         private const val REQUEST_PAUSE = 4052
         private const val REQUEST_RESUME = 4053

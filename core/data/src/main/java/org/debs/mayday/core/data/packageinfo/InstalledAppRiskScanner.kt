@@ -42,7 +42,7 @@ class InstalledAppRiskScanner @Inject constructor() {
                 packageName = packageName,
                 requestedPermissions = requestedPermissions,
                 apkPaths = apkPaths,
-            )
+            ) ?: throw AppRiskScanUnavailableException(packageName, apkPaths)
         }
     }
 
@@ -50,18 +50,21 @@ class InstalledAppRiskScanner @Inject constructor() {
         packageName: String,
         requestedPermissions: List<String>,
         apkPaths: List<String>,
-    ): AppRiskScanResult {
+    ): AppRiskScanResult? {
         val detected = linkedMapOf<String, String>()
-        apkPaths
+        val scannedAnyApk = apkPaths
             .asSequence()
             .filter(String::isNotBlank)
             .distinct()
-            .forEach { path ->
+            .map { path ->
                 scanApk(
                     path = path,
                     detected = detected,
                 )
             }
+            .any { it }
+
+        if (!scannedAnyApk) return null
 
         val knownApp = findKnownApp(packageName)
         return score(
@@ -74,52 +77,57 @@ class InstalledAppRiskScanner @Inject constructor() {
     private fun scanApk(
         path: String,
         detected: MutableMap<String, String>,
-    ) {
+    ): Boolean {
         val apkFile = File(path)
-        if (!apkFile.isFile || !apkFile.canRead()) return
+        if (!apkFile.isFile || !apkFile.canRead()) return false
 
-        runCatching {
+        return runCatching {
+            var scannedEntry = false
             ZipFile(apkFile).use { zipFile ->
                 val entries = zipFile.entries()
                 while (entries.hasMoreElements() && detected.size < compiledRules.size) {
                     val entry = entries.nextElement()
                     if (entry.isDirectory || !entry.shouldScan()) continue
                     val evidence = "${apkFile.name}!/${entry.name}"
-                    if (entry.isManifest()) {
-                        val parsed = scanManifestEntry(
-                            apkFile = apkFile,
-                            evidence = evidence,
-                            detected = detected,
-                        )
-                        if (!parsed) {
+                    val entryScanned = runCatching {
+                        if (entry.isManifest()) {
+                            val parsed = scanManifestEntry(
+                                apkFile = apkFile,
+                                evidence = evidence,
+                                detected = detected,
+                            )
+                            if (!parsed) {
+                                zipFile.getInputStream(entry).use { input ->
+                                    scanBinaryEntry(
+                                        input = input,
+                                        evidence = evidence,
+                                        detected = detected,
+                                    )
+                                }
+                            }
+                        } else {
                             zipFile.getInputStream(entry).use { input ->
-                                scanBinaryEntry(
-                                    input = input,
-                                    evidence = evidence,
-                                    detected = detected,
-                                )
+                                if (entry.isDex()) {
+                                    scanDexEntry(
+                                        input = input,
+                                        evidence = evidence,
+                                        detected = detected,
+                                    )
+                                } else {
+                                    scanBinaryEntry(
+                                        input = input,
+                                        evidence = evidence,
+                                        detected = detected,
+                                    )
+                                }
                             }
                         }
-                    } else {
-                        zipFile.getInputStream(entry).use { input ->
-                            if (entry.isDex()) {
-                                scanDexEntry(
-                                    input = input,
-                                    evidence = evidence,
-                                    detected = detected,
-                                )
-                            } else {
-                                scanBinaryEntry(
-                                    input = input,
-                                    evidence = evidence,
-                                    detected = detected,
-                                )
-                            }
-                        }
-                    }
+                    }.isSuccess
+                    scannedEntry = scannedEntry || entryScanned
                 }
             }
-        }
+            scannedEntry
+        }.getOrDefault(false)
     }
 
     private fun scanManifestEntry(
@@ -2126,6 +2134,13 @@ class InstalledAppRiskScanner @Inject constructor() {
             }
         }
     }
+
+    private class AppRiskScanUnavailableException(
+        packageName: String,
+        apkPaths: List<String>,
+    ) : IllegalStateException(
+        "Unable to scan APK contents for $packageName: ${apkPaths.joinToString()}",
+    )
 
     private companion object {
         private const val CRITICAL_SCORE = 90

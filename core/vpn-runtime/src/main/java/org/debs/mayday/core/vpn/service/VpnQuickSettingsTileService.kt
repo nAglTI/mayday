@@ -50,7 +50,7 @@ class VpnQuickSettingsTileService : TileService() {
         super.onClick()
         when (stateStore.state.value.status) {
             VpnConnectionStatus.Starting,
-            VpnConnectionStatus.Running -> startService(VpnCoreService.stopIntent(this))
+            VpnConnectionStatus.Running -> startService(VpnCoreService.disconnectIntent(this))
 
             VpnConnectionStatus.Stopping -> Unit
 

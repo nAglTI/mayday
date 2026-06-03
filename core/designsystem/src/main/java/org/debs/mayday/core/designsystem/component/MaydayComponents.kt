@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -117,6 +118,7 @@ fun MaydayHeroCard(
     modifier: Modifier = Modifier,
     filledAction: Boolean = true,
     actionEnabled: Boolean = true,
+    actionLoading: Boolean = false,
     showHalo: Boolean = false,
     extraContent: @Composable ColumnScope.() -> Unit = {},
 ) {
@@ -133,13 +135,17 @@ fun MaydayHeroCard(
         Box {
             if (showHalo) {
                 Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .offset(x = 36.dp, y = (-52).dp)
-                        .size(220.dp)
-                        .blur(20.dp)
-                        .background(colors.primaryContainer.copy(alpha = 0.72f), CircleShape),
-                )
+                    modifier = Modifier.matchParentSize(),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .offset(x = 36.dp, y = (-52).dp)
+                            .size(220.dp)
+                            .blur(20.dp)
+                            .background(colors.primaryContainer.copy(alpha = 0.72f), CircleShape),
+                    )
+                }
             }
             Column(
                 modifier = Modifier.padding(density.heroPadding),
@@ -160,11 +166,13 @@ fun MaydayHeroCard(
                         color = colors.onSurfaceVariant,
                     )
                 }
-                Text(
-                    text = title,
-                    style = if (compact) MaterialTheme.typography.displayMedium else MaterialTheme.typography.displayLarge,
-                    color = colors.onSurface,
-                )
+                if (title.isNotBlank()) {
+                    Text(
+                        text = title,
+                        style = if (compact) MaterialTheme.typography.displayMedium else MaterialTheme.typography.displayLarge,
+                        color = colors.onSurface,
+                    )
+                }
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.bodySmall,
@@ -179,6 +187,7 @@ fun MaydayHeroCard(
                         .height(density.actionHeight),
                     filled = filledAction,
                     enabled = actionEnabled,
+                    loading = actionLoading,
                 )
             }
         }
@@ -295,8 +304,10 @@ fun MaydayActionButton(
     modifier: Modifier = Modifier,
     filled: Boolean = true,
     enabled: Boolean = true,
+    loading: Boolean = false,
 ) {
     val colors = MaterialTheme.colorScheme
+    val effectiveEnabled = enabled && !loading
     val containerColor = if (filled) colors.primary else Color.Transparent
     val contentColor = if (filled) {
         if (colors.primary.luminance() > 0.5f) colors.background else Color.White
@@ -307,10 +318,10 @@ fun MaydayActionButton(
     Surface(
         modifier = modifier
             .heightIn(min = 52.dp)
-            .alpha(if (enabled) 1f else 0.45f)
+            .alpha(if (enabled || loading) 1f else 0.45f)
             .clip(CircleShape)
             .clickable(
-                enabled = enabled,
+                enabled = effectiveEnabled,
                 interactionSource = interactionSource,
                 indication = null,
                 onClick = onClick,
@@ -326,14 +337,26 @@ fun MaydayActionButton(
                 .padding(horizontal = 16.dp, vertical = 14.dp),
             contentAlignment = Alignment.Center,
         ) {
-            Text(
-                text = text,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = contentColor,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (loading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        color = contentColor,
+                        strokeWidth = 2.dp,
+                    )
+                }
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = contentColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }

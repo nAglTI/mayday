@@ -20,6 +20,8 @@ import org.debs.mayday.core.data.repository.VpnProfileRepository
 import org.debs.mayday.core.designsystem.theme.maydayStrings
 import org.debs.mayday.core.model.AppSemanticAnalysisResult
 import org.debs.mayday.core.model.SplitTunnelMode
+import org.debs.mayday.core.model.VpnConnectionStatus
+import org.debs.mayday.core.vpn.controller.VpnConnectionController
 import javax.inject.Inject
 
 @HiltViewModel
@@ -28,6 +30,7 @@ class SplitViewModel @Inject constructor(
     private val uiPreferencesRepository: UiPreferencesRepository,
     private val installedAppsRepository: InstalledAppsRepository,
     private val semanticAnalysisRepository: SemanticAnalysisRepository,
+    private val connectionController: VpnConnectionController,
 ) : ViewModel() {
 
     private val mutableState = MutableStateFlow(
@@ -38,11 +41,12 @@ class SplitViewModel @Inject constructor(
     val effect: Flow<SplitUiEffect> = effectChannel.receiveAsFlow()
 
     private var allApps: List<SplitAppItem> = emptyList()
+    private var savedSnapshot: SplitConfigSnapshot? = null
 
     init {
         viewModelScope.launch {
             uiPreferencesRepository.preferences.collectLatest { preferences ->
-                mutableState.update { it.copy(uiPreferences = preferences) }
+                update { copy(uiPreferences = preferences) }
             }
         }
     }
@@ -122,7 +126,7 @@ class SplitViewModel @Inject constructor(
                         ?: AppSemanticAnalysisResult(),
                 )
             }
-            mutableState.value = SplitUiState(
+            val loadedState = SplitUiState(
                 uiPreferences = mutableState.value.uiPreferences,
                 splitTunnelMode = profile.splitTunnelMode,
                 installedApps = filterApps(
@@ -137,35 +141,52 @@ class SplitViewModel @Inject constructor(
                 appSortMode = currentState.appSortMode,
                 isLoading = false,
             )
+            savedSnapshot = loadedState.toConfigSnapshot()
+            mutableState.value = loadedState.copy(hasUnsavedChanges = false)
         }
     }
 
     private fun save() {
+        if (!uiState.value.hasUnsavedChanges) {
+            return
+        }
         viewModelScope.launch {
             update { copy(isLoading = true, message = null) }
+            val currentState = uiState.value
             runCatching {
-                val selectedPackages = uiState.value.selectedPackages
+                val selectedPackages = currentState.selectedPackages
                     .asSequence()
                     .map(String::trim)
                     .filter(String::isNotBlank)
                     .toSet()
                 if (
-                    uiState.value.splitTunnelMode == SplitTunnelMode.ONLY_SELECTED &&
+                    currentState.splitTunnelMode == SplitTunnelMode.ONLY_SELECTED &&
                     selectedPackages.isEmpty()
                 ) {
                     error(strings().atLeastOneAppRequired)
                 }
                 val latestProfile = profileRepository.profile.first()
+                val wasRunning = connectionController.state.value.status == VpnConnectionStatus.Running
                 profileRepository.save(
                     latestProfile.copy(
-                        splitTunnelMode = uiState.value.splitTunnelMode,
+                        splitTunnelMode = currentState.splitTunnelMode,
                         selectedPackages = selectedPackages,
                     ),
                 )
+                if (wasRunning) {
+                    connectionController.stop()
+                    connectionController.start()
+                }
+                SplitConfigSnapshot(
+                    splitTunnelMode = currentState.splitTunnelMode,
+                    selectedPackages = selectedPackages,
+                )
             }.onSuccess {
+                savedSnapshot = it
                 update {
                     copy(
                         isLoading = false,
+                        hasUnsavedChanges = false,
                     )
                 }
                 effectChannel.send(SplitUiEffect.NavigateBack)
@@ -181,7 +202,9 @@ class SplitViewModel @Inject constructor(
     }
 
     private fun update(transform: SplitUiState.() -> SplitUiState) {
-        mutableState.update(transform)
+        mutableState.update { state ->
+            state.transform().withConfigChanges()
+        }
     }
 
     private fun emitEffect(effect: SplitUiEffect) {
@@ -226,4 +249,21 @@ class SplitViewModel @Inject constructor(
     }
 
     private fun strings() = maydayStrings(uiState.value.uiPreferences.language)
+
+    private fun SplitUiState.withConfigChanges(): SplitUiState {
+        val snapshot = savedSnapshot ?: return this
+        return copy(hasUnsavedChanges = toConfigSnapshot() != snapshot)
+    }
+
+    private fun SplitUiState.toConfigSnapshot(): SplitConfigSnapshot {
+        return SplitConfigSnapshot(
+            splitTunnelMode = splitTunnelMode,
+            selectedPackages = selectedPackages,
+        )
+    }
 }
+
+private data class SplitConfigSnapshot(
+    val splitTunnelMode: SplitTunnelMode,
+    val selectedPackages: Set<String>,
+)

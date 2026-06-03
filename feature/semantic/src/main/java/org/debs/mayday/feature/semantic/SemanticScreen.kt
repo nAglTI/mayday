@@ -46,6 +46,7 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import org.debs.mayday.core.designsystem.component.MaydayActionButton
@@ -57,6 +58,7 @@ import org.debs.mayday.core.designsystem.component.MaydayTextField
 import org.debs.mayday.core.designsystem.component.MaydayToggle
 import org.debs.mayday.core.designsystem.component.MaydayTopBar
 import org.debs.mayday.core.designsystem.theme.LocalMaydayDensity
+import org.debs.mayday.core.designsystem.theme.MaydayTheme
 import org.debs.mayday.core.model.AppLanguage
 import org.debs.mayday.core.model.AppRiskLevel
 import org.debs.mayday.core.model.AppSemanticAnalysisResult
@@ -67,6 +69,9 @@ import org.debs.mayday.core.model.AppSemanticRiskScope
 import org.debs.mayday.core.model.AppSemanticSignal
 import org.debs.mayday.core.model.AppSemanticSignalType
 import org.debs.mayday.core.model.AppSemanticVerdictStatus
+import org.debs.mayday.core.model.AppThemeMode
+import org.debs.mayday.core.model.InstalledApp
+import org.debs.mayday.core.model.UiPreferences
 import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -519,6 +524,183 @@ private fun SemanticScanNotice(
     }
 }
 
+@Preview(name = "Semantic / Loading", showBackground = true, widthDp = 390, heightDp = 844)
+@Composable
+private fun SemanticLoadingPreview() {
+    SemanticScreenPreview(
+        state = SemanticUiState(
+            uiPreferences = previewSemanticPreferences(),
+            isLoading = true,
+        ),
+    )
+}
+
+@Preview(name = "Semantic / Running Scan", showBackground = true, widthDp = 390, heightDp = 844)
+@Composable
+private fun SemanticRunningScanPreview() {
+    SemanticScreenPreview(
+        state = SemanticUiState(
+            uiPreferences = previewSemanticPreferences(),
+            isLoading = false,
+            apps = previewSemanticApps(),
+            scannedApps = 2,
+            totalApps = 3,
+            isScanRunning = true,
+            selectedPackageNames = setOf("com.bank.app"),
+            queuedPackageNames = setOf("com.browser.mobile"),
+            scanningPackageNames = setOf("com.bank.app"),
+            currentScanPackageName = "com.bank.app",
+            currentScanLabel = "Bank App",
+        ),
+    )
+}
+
+@Preview(name = "Semantic / Exporting", showBackground = true, widthDp = 390, heightDp = 844)
+@Composable
+private fun SemanticExportingPreview() {
+    SemanticScreenPreview(
+        state = SemanticUiState(
+            uiPreferences = previewSemanticPreferences(
+                themeMode = AppThemeMode.LIGHT,
+                language = AppLanguage.EN,
+            ),
+            isLoading = false,
+            apps = previewSemanticApps(),
+            scannedApps = 3,
+            totalApps = 3,
+            isExportingReport = true,
+            exportProgress = SemanticExportUiProgress(
+                stage = SemanticExportUiStage.COPYING_ARTIFACTS,
+                currentFileName = "report.json",
+                completedFiles = 12,
+                totalFiles = 40,
+                copiedBytes = 12_500_000L,
+                totalBytes = 44_000_000L,
+            ),
+        ),
+    )
+}
+
+@Composable
+private fun SemanticScreenPreview(state: SemanticUiState) {
+    MaydayTheme(
+        themeMode = state.uiPreferences.themeMode,
+        language = state.uiPreferences.language,
+        density = state.uiPreferences.density,
+    ) {
+        SemanticScreen(
+            state = state,
+            onEvent = {},
+        )
+    }
+}
+
+private fun previewSemanticApps(): List<SemanticAppItem> {
+    val vpnProbeSignal = AppSemanticSignal(
+        type = AppSemanticSignalType.CALL_GRAPH,
+        title = "NetworkCapabilities VPN transport check",
+        description = "Checks active network transport before enabling a restricted flow.",
+        evidence = "ConnectivityManager.getNetworkCapabilities(...).hasTransport(4)",
+        confidence = 88,
+        scope = AppSemanticRiskScope.APP_CODE,
+        source = AppSemanticEvidenceSource.DIRECT_APP_CODE,
+        evidenceChain = listOf(
+            "ConnectivityManager#getActiveNetwork",
+            "NetworkCapabilities#hasTransport(TRANSPORT_VPN)",
+            "Telemetry upload branch",
+        ),
+        proofConfidence = 90,
+        proofReason = "Connected preview signal",
+    )
+    val sdkSignal = AppSemanticSignal(
+        type = AppSemanticSignalType.STRING_FLOW,
+        title = "SDK proxy inventory",
+        description = "SDK gathers local proxy flags without a proven blocking decision.",
+        evidence = "proxyHost / vpnActive payload",
+        confidence = 48,
+        scope = AppSemanticRiskScope.SDK_CODE,
+        source = AppSemanticEvidenceSource.SDK,
+        proofConfidence = 42,
+    )
+    return listOf(
+        SemanticAppItem(
+            app = InstalledApp(
+                packageName = "com.bank.app",
+                label = "Bank App",
+                isSystem = false,
+                versionName = "4.8.1",
+            ),
+            analysis = AppSemanticAnalysisResult(
+                score = 72,
+                riskLevel = AppRiskLevel.HIGH,
+                signals = listOf(vpnProbeSignal),
+                appCodeRisk = AppSemanticRiskBucket(
+                    score = 72,
+                    riskLevel = AppRiskLevel.HIGH,
+                    signals = listOf(vpnProbeSignal),
+                ),
+                methodsAnalyzed = 1840,
+                cfgNodeCount = 6200,
+                cfgEdgeCount = 8100,
+                dfgEdgeCount = 1240,
+                scannedAtEpochMillis = 1_714_000_200_000L,
+            ),
+        ),
+        SemanticAppItem(
+            app = InstalledApp(
+                packageName = "org.telegram.messenger",
+                label = "Telegram",
+                isSystem = false,
+                versionName = "10.15",
+            ),
+            analysis = AppSemanticAnalysisResult(
+                score = 0,
+                riskLevel = AppRiskLevel.CLEAN,
+                methodsAnalyzed = 920,
+                cfgNodeCount = 3100,
+                cfgEdgeCount = 4500,
+                dfgEdgeCount = 420,
+                scannedAtEpochMillis = 1_714_000_000_000L,
+                cleanScore = 92,
+            ),
+        ),
+        SemanticAppItem(
+            app = InstalledApp(
+                packageName = "com.browser.mobile",
+                label = "Browser",
+                isSystem = false,
+                versionName = "126.0",
+            ),
+            analysis = AppSemanticAnalysisResult(
+                score = 24,
+                riskLevel = AppRiskLevel.MEDIUM,
+                signals = listOf(sdkSignal),
+                sdkCodeRisk = AppSemanticRiskBucket(
+                    score = 24,
+                    riskLevel = AppRiskLevel.MEDIUM,
+                    signals = listOf(sdkSignal),
+                ),
+                methodsAnalyzed = 2460,
+                cfgNodeCount = 8400,
+                cfgEdgeCount = 10_300,
+                dfgEdgeCount = 1720,
+                scannedAtEpochMillis = 1_714_000_100_000L,
+            ),
+        ),
+    )
+}
+
+private fun previewSemanticPreferences(
+    themeMode: AppThemeMode = AppThemeMode.DARK,
+    language: AppLanguage = AppLanguage.EN,
+): UiPreferences {
+    return UiPreferences(
+        themeMode = themeMode,
+        language = language,
+        onboardingCompleted = true,
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SemanticScanInfoSheet(
@@ -753,10 +935,11 @@ private fun SemanticBadge(
     isQueued: Boolean = false,
     text: SemanticText,
 ) {
-    val color = if (isScanning || isQueued) {
-        MaterialTheme.colorScheme.onSurfaceVariant
-    } else {
-        semanticRiskColor(result.riskLevel)
+    val isPending = result.scannedAtEpochMillis == 0L
+    val color = when {
+        isScanning || isQueued -> MaterialTheme.colorScheme.onSurfaceVariant
+        isPending -> semanticPendingColor()
+        else -> semanticRiskColor(result.riskLevel)
     }
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -1050,6 +1233,15 @@ private fun semanticRiskColor(level: AppRiskLevel): Color {
         }
         AppRiskLevel.LOW -> MaterialTheme.colorScheme.onSurfaceVariant
         AppRiskLevel.CLEAN -> MaterialTheme.colorScheme.primary
+    }
+}
+
+@Composable
+private fun semanticPendingColor(): Color {
+    return if (MaterialTheme.colorScheme.background.luminance() < 0.5f) {
+        Color(0xFF64B5F6)
+    } else {
+        Color(0xFF1565C0)
     }
 }
 

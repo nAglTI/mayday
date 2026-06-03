@@ -14,6 +14,7 @@ data class SplitUiState(
     val appSearchQuery: String = "",
     val appSortMode: SplitAppSortMode = SplitAppSortMode.ROUTING,
     val isLoading: Boolean = true,
+    val hasUnsavedChanges: Boolean = false,
     val message: String? = null,
 )
 

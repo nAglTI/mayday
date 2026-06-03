@@ -33,6 +33,7 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import org.debs.mayday.core.designsystem.component.MaydayBottomActionBar
 import org.debs.mayday.core.designsystem.component.MaydayScreenBackground
@@ -43,12 +44,17 @@ import org.debs.mayday.core.designsystem.component.MaydayTextField
 import org.debs.mayday.core.designsystem.component.MaydayToggle
 import org.debs.mayday.core.designsystem.component.MaydayTopBar
 import org.debs.mayday.core.designsystem.theme.LocalMaydayDensity
+import org.debs.mayday.core.designsystem.theme.MaydayTheme
 import org.debs.mayday.core.designsystem.theme.MaydayStrings
 import org.debs.mayday.core.designsystem.theme.maydayStrings
+import org.debs.mayday.core.designsystem.theme.saveAppSelection
 import org.debs.mayday.core.model.AppLanguage
 import org.debs.mayday.core.model.AppRiskLevel
 import org.debs.mayday.core.model.AppSemanticAnalysisResult
+import org.debs.mayday.core.model.AppThemeMode
+import org.debs.mayday.core.model.InstalledApp
 import org.debs.mayday.core.model.SplitTunnelMode
+import org.debs.mayday.core.model.UiPreferences
 
 @Composable
 internal fun SplitScreen(
@@ -70,16 +76,14 @@ internal fun SplitScreen(
             containerColor = Color.Transparent,
             snackbarHost = { SnackbarHost(snackbarHostState) },
             bottomBar = {
-                MaydayBottomActionBar(
-                    primaryText = if (state.isLoading) strings.loading else strings.splitRouting,
-                    onPrimaryClick = { onEvent(SplitUiEvent.SaveClicked) },
-                    enabled = !state.isLoading,
-                    supportingText = if (state.isLoading) {
-                        strings.readSavedRoutingState
-                    } else {
-                        "${state.selectedPackages.size} ${strings.apps}"
-                    },
-                )
+                if (state.hasUnsavedChanges) {
+                    MaydayBottomActionBar(
+                        primaryText = if (state.isLoading) strings.saving else strings.saveAppSelection,
+                        onPrimaryClick = { onEvent(SplitUiEvent.SaveClicked) },
+                        enabled = !state.isLoading,
+                        supportingText = "${state.selectedPackages.size} ${strings.apps}",
+                    )
+                }
             },
         ) { innerPadding ->
             LazyColumn(
@@ -330,7 +334,7 @@ private fun SplitSemanticBadge(
     val color = if (isScanned) {
         splitSemanticRiskColor(analysis.riskLevel)
     } else {
-        MaterialTheme.colorScheme.onSurfaceVariant
+        splitSemanticUnscannedColor()
     }
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -381,6 +385,15 @@ private fun splitSemanticRiskColor(level: AppRiskLevel): Color {
         }
         AppRiskLevel.LOW -> MaterialTheme.colorScheme.onSurfaceVariant
         AppRiskLevel.CLEAN -> MaterialTheme.colorScheme.primary
+    }
+}
+
+@Composable
+private fun splitSemanticUnscannedColor(): Color {
+    return if (MaterialTheme.colorScheme.background.luminance() < 0.5f) {
+        Color(0xFF64B5F6)
+    } else {
+        Color(0xFF1565C0)
     }
 }
 
@@ -445,4 +458,92 @@ private fun splitRiskLevelLabel(
             AppRiskLevel.CLEAN -> "clean"
         }
     }
+}
+
+@Preview(name = "Split / Loading", showBackground = true, widthDp = 390, heightDp = 844)
+@Composable
+private fun SplitLoadingPreview() {
+    SplitScreenPreview(
+        state = SplitUiState(
+            uiPreferences = previewSplitPreferences(),
+            isLoading = true,
+        ),
+    )
+}
+
+@Preview(name = "Split / Selected Apps", showBackground = true, widthDp = 390, heightDp = 844)
+@Composable
+private fun SplitSelectedAppsPreview() {
+    SplitScreenPreview(
+        state = SplitUiState(
+            uiPreferences = previewSplitPreferences(),
+            splitTunnelMode = SplitTunnelMode.ONLY_SELECTED,
+            installedApps = previewSplitApps(),
+            selectedPackages = setOf("org.telegram.messenger", "com.browser.mobile"),
+            appSortMode = SplitAppSortMode.RISK_SCORE,
+            isLoading = false,
+        ),
+    )
+}
+
+@Composable
+private fun SplitScreenPreview(state: SplitUiState) {
+    MaydayTheme(
+        themeMode = state.uiPreferences.themeMode,
+        language = state.uiPreferences.language,
+        density = state.uiPreferences.density,
+    ) {
+        SplitScreen(
+            state = state,
+            onEvent = {},
+        )
+    }
+}
+
+private fun previewSplitApps(): List<SplitAppItem> {
+    return listOf(
+        SplitAppItem(
+            app = InstalledApp(
+                packageName = "org.telegram.messenger",
+                label = "Telegram",
+                isSystem = false,
+                versionName = "10.15",
+            ),
+            semanticAnalysis = AppSemanticAnalysisResult(
+                score = 8,
+                riskLevel = AppRiskLevel.LOW,
+                scannedAtEpochMillis = 1_714_000_000_000L,
+                cleanScore = 80,
+            ),
+        ),
+        SplitAppItem(
+            app = InstalledApp(
+                packageName = "com.bank.app",
+                label = "Bank App",
+                isSystem = false,
+                versionName = "4.8.1",
+            ),
+            semanticAnalysis = AppSemanticAnalysisResult(
+                score = 62,
+                riskLevel = AppRiskLevel.HIGH,
+                scannedAtEpochMillis = 1_714_000_200_000L,
+            ),
+        ),
+        SplitAppItem(
+            app = InstalledApp(
+                packageName = "com.browser.mobile",
+                label = "Browser",
+                isSystem = false,
+                versionName = "126.0",
+            ),
+        ),
+    )
+}
+
+private fun previewSplitPreferences(): UiPreferences {
+    return UiPreferences(
+        themeMode = AppThemeMode.DARK,
+        language = AppLanguage.EN,
+        onboardingCompleted = true,
+    )
 }

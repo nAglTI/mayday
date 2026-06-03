@@ -10,6 +10,8 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.Handler
@@ -38,6 +40,8 @@ import org.debs.mayday.core.model.VpnProfile
 import org.debs.mayday.core.model.VpnRuntimeState
 import org.debs.mayday.core.vpn.controller.VpnConnectionStateStore
 import org.debs.mayday.core.vpn.notification.VpnNotificationFactory
+import org.json.JSONArray
+import org.json.JSONObject
 import javax.inject.Inject
 
 @SuppressLint("VpnServicePolicy")
@@ -73,10 +77,12 @@ class VpnCoreService : VpnService() {
     }
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
+            clearEndpointTelemetryCache()
             vpnCoreBridge.onNetworkChange()
         }
 
         override fun onLost(network: Network) {
+            clearEndpointTelemetryCache()
             vpnCoreBridge.onNetworkChange()
         }
     }
@@ -92,6 +98,8 @@ class VpnCoreService : VpnService() {
     @Volatile private var isStopRequested = false
     @Volatile private var assignedIp: String? = null
     @Volatile private var pendingAssignedIp: String? = null
+    @Volatile private var transportLabels: Map<String, String> = emptyMap()
+    private val endpointTelemetryCache = mutableMapOf<EndpointDiagnosticKey, EndpointTelemetry>()
 
     override fun onCreate() {
         super.onCreate()
@@ -102,11 +110,11 @@ class VpnCoreService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         return when (intent?.action) {
             ACTION_STOP -> {
-                stopVpn(removeNotification = true)
+                stopVpn(removeNotification = true, shutdownCore = true)
                 START_NOT_STICKY
             }
             ACTION_DISCONNECT -> {
-                stopVpn(removeNotification = false)
+                stopVpn(removeNotification = false, shutdownCore = false)
                 START_NOT_STICKY
             }
             ACTION_START, null -> {
@@ -135,6 +143,7 @@ class VpnCoreService : VpnService() {
 
                 val profile = profileRepository.profile.first()
                 ensureReconfigWorker()
+                clearEndpointTelemetryCache()
                 isStopRequested = false
                 isStarting = true
                 isVpnActive = false
@@ -151,8 +160,8 @@ class VpnCoreService : VpnService() {
         publishState(
             VpnRuntimeState(
                 status = VpnConnectionStatus.Starting,
-                headline = "Starting VPN shell",
-                detail = "Preparing placeholder 10.0.0.2/32 TUN and connecting to relay.",
+                headline = "Starting VPN core",
+                detail = "Starting discovery runner, warming up probes, and preparing TUN.",
                 engineAvailable = vpnCoreBridge.isLinked,
                 activeProfileSummary = profile.endpointSummary(),
                 engineDiagnostics = vpnCoreBridge.linkErrorMessage,
@@ -177,6 +186,10 @@ class VpnCoreService : VpnService() {
             stopSelf()
             return
         }
+
+        transportLabels = vpnCoreBridge.supportedTransportsJson()
+            .getOrNull()
+            .toTransportLabels()
 
         val startupPayload = runCatching {
             val configJson = configEncoder.encode(profile)
@@ -214,6 +227,7 @@ class VpnCoreService : VpnService() {
                 tunFileDescriptor = tunFd,
                 configJson = configJson,
                 socketProtector = { socketFd -> protect(socketFd) },
+                statusHandler = ::onCoreStatus,
                 tunReconfigurator = { assignedIp, maskBits ->
                     onAssignedIp(assignedIp, maskBits.toInt())
                 },
@@ -235,7 +249,7 @@ class VpnCoreService : VpnService() {
                 VpnRuntimeState(
                     status = VpnConnectionStatus.Running,
                     headline = "VPN core started",
-                    detail = "Relay connected over placeholder TUN. Waiting for AssignedIP hot-swap.",
+                    detail = "Runner attached the TUN after bootstrap warmup. Waiting for runtime status.",
                     engineAvailable = true,
                     activeProfileSummary = profile.endpointSummary(),
                     engineDiagnostics = vpnCoreBridge.linkErrorMessage,
@@ -270,10 +284,15 @@ class VpnCoreService : VpnService() {
     ): Int? {
         val builder = Builder()
             .setSession("mayday")
-            .setMtu(profile.transportMode.defaultMtu())
+            .setMtu(profile.mtu)
             .addAddress(ip, prefix)
-            .addRoute("0.0.0.0", 0)
             .applySplitTunnel(profile)
+
+        if (ip.contains(':')) {
+            builder.addRoute("::", 0)
+        } else {
+            builder.addRoute("0.0.0.0", 0)
+        }
 
         profile.dnsServers.forEach { dns ->
             if (dns.isNotBlank()) {
@@ -286,6 +305,10 @@ class VpnCoreService : VpnService() {
 
     private fun onAssignedIp(ip: String, maskBits: Int) {
         if (!isVpnActive || isStopRequested || ip.isBlank()) {
+            return
+        }
+        if (activeProfile?.disableIpv6 == true && ip.contains(':')) {
+            Log.d(TAG, "Ignoring IPv6 address refresh because disable_ipv6 is enabled.")
             return
         }
         if (ip == assignedIp || ip == pendingAssignedIp) {
@@ -310,6 +333,372 @@ class VpnCoreService : VpnService() {
             pendingAssignedIp = null
             Log.e(TAG, "Refresh dispatch failed.")
         }
+    }
+
+    private fun onCoreStatus(statusJson: String) {
+        if (statusJson.isBlank()) {
+            return
+        }
+
+        mainHandler.post {
+            val runtimeState = statusJson.toRuntimeState() ?: return@post
+            if (isStopRequested && runtimeState.status != VpnConnectionStatus.Idle) {
+                return@post
+            }
+            publishState(runtimeState.keepConnectingDuringBootstrap())
+        }
+    }
+
+    private fun VpnRuntimeState.keepConnectingDuringBootstrap(): VpnRuntimeState {
+        if (!isStarting || status != VpnConnectionStatus.Idle) {
+            return this
+        }
+
+        return copy(
+            status = VpnConnectionStatus.Starting,
+            headline = "Probing relays",
+            detail = detail.takeIf { it.isNotBlank() && it != "state vpn_inactive" }
+                ?: "Waiting for bootstrap probe results before attaching VPN.",
+        )
+    }
+
+    private fun String.toRuntimeState(): VpnRuntimeState? {
+        return runCatching {
+            val json = JSONObject(this)
+            val state = json.optString("state").trim()
+            val vpnState = json.optString("vpn_state").trim()
+            val relayId = json.optString("active_relay_id").trim()
+            val transportId = json.optString("active_transport").trim()
+            val serverId = json.optString("active_server_id").trim()
+            val status = state.toConnectionStatus(vpnState)
+            val transportLabel = transportLabels[transportId].orEmpty().ifBlank { transportId }
+            val protocols = json.optJSONArray("protocols")
+            val endpoints = json.optJSONArray("endpoints")
+            val uploadBps = json.firstPositiveDouble(*UPLOAD_RATE_FIELDS).ifZero {
+                maxOf(
+                    protocols.maxFirstPositiveDouble(*UPLOAD_RATE_FIELDS),
+                    endpoints.maxFirstPositiveDouble(*UPLOAD_RATE_FIELDS),
+                )
+            }
+            val downloadBps = json.firstPositiveDouble(*DOWNLOAD_RATE_FIELDS).ifZero {
+                maxOf(
+                    protocols.maxFirstPositiveDouble(*DOWNLOAD_RATE_FIELDS),
+                    endpoints.maxFirstPositiveDouble(*DOWNLOAD_RATE_FIELDS),
+                )
+            }
+            val aggregateBps = json.firstPositiveDouble(*AGGREGATE_RATE_FIELDS).ifZero {
+                maxOf(
+                    uploadBps + downloadBps,
+                    protocols.maxFirstPositiveDouble(*AGGREGATE_RATE_FIELDS),
+                    endpoints.maxFirstPositiveDouble(*AGGREGATE_RATE_FIELDS),
+                )
+            }
+            val detail = buildList {
+                if (relayId.isNotBlank()) add("relay $relayId")
+                if (transportLabel.isNotBlank()) add("transport $transportLabel")
+                if (serverId.isNotBlank()) add("exit $serverId")
+            }.joinToString(", ").ifBlank {
+                if (state.isNotBlank()) "state $state" else "runtime status received"
+            }
+
+            VpnRuntimeState(
+                status = status,
+                headline = status.headlineFor(state),
+                detail = detail,
+                engineAvailable = vpnCoreBridge.isLinked,
+                activeProfileSummary = currentProfileSummary,
+                engineDiagnostics = vpnCoreBridge.linkErrorMessage,
+                coreState = state,
+                vpnState = vpnState,
+                activeRelayId = relayId,
+                activeTransportId = transportId,
+                activeTransportLabel = transportLabel,
+                activeServerId = serverId,
+                uploadBps = uploadBps,
+                downloadBps = downloadBps,
+                aggregateBps = aggregateBps,
+                protocolDiagnostics = protocols.summarizeProtocols(
+                    labels = transportLabels,
+                    activeTransportId = transportId,
+                ),
+                endpointDiagnostics = endpoints.summarizeEndpoints(
+                    labels = transportLabels,
+                    activeRelayId = relayId,
+                    activeTransportId = transportId,
+                    retainMeasurements = status in DIAGNOSTIC_RETAIN_STATES,
+                ),
+            )
+        }.getOrElse { error ->
+            Log.w(TAG, "Unable to parse vpncore status JSON.", error)
+            null
+        }
+    }
+
+    private fun String.toConnectionStatus(vpnState: String): VpnConnectionStatus {
+        val normalizedState = lowercase()
+        val normalizedVpnState = vpnState.lowercase()
+        return when {
+            normalizedState in FAILED_STATES -> VpnConnectionStatus.Error
+            normalizedState in CONNECTING_STATES -> VpnConnectionStatus.Starting
+            normalizedState in ACTIVE_STATES -> VpnConnectionStatus.Running
+            normalizedState in INACTIVE_STATES -> VpnConnectionStatus.Idle
+            normalizedVpnState == "active" -> VpnConnectionStatus.Running
+            normalizedVpnState == "inactive" -> VpnConnectionStatus.Idle
+            else -> stateStore.state.value.status
+        }
+    }
+
+    private fun VpnConnectionStatus.headlineFor(coreState: String): String {
+        val normalizedState = coreState.lowercase()
+        return when {
+            normalizedState == "degraded" -> "VPN degraded"
+            this == VpnConnectionStatus.Running -> "VPN tunnel active"
+            this == VpnConnectionStatus.Starting -> "VPN connecting"
+            this == VpnConnectionStatus.Idle -> "VPN inactive"
+            this == VpnConnectionStatus.Error -> "VPN failed"
+            else -> coreState.ifBlank { "VPN runtime status" }
+        }
+    }
+
+    private fun JSONObject.firstPositiveDouble(vararg fields: String): Double {
+        fields.forEach { field ->
+            val direct = optPositiveDouble(field)
+            if (direct > 0.0) {
+                return direct
+            }
+        }
+
+        NESTED_METRIC_OBJECTS.forEach { objectName ->
+            val nested = optJSONObject(objectName) ?: return@forEach
+            val nestedValue = nested.firstPositiveDouble(*fields)
+            if (nestedValue > 0.0) {
+                return nestedValue
+            }
+        }
+
+        return 0.0
+    }
+
+    private fun JSONObject.optPositiveDouble(field: String): Double {
+        val value = when (val raw = opt(field)) {
+            is Number -> raw.toDouble()
+            is String -> raw.trim().toDoubleOrNull()
+            else -> null
+        } ?: return 0.0
+        return if (value > 0.0 && !value.isNaN() && !value.isInfinite()) value else 0.0
+    }
+
+    private fun JSONArray?.maxFirstPositiveDouble(vararg fields: String): Double {
+        if (this == null) {
+            return 0.0
+        }
+
+        var maxValue = 0.0
+        for (index in 0 until length()) {
+            val item = optJSONObject(index) ?: continue
+            maxValue = maxOf(maxValue, item.firstPositiveDouble(*fields))
+        }
+        return maxValue
+    }
+
+    private fun JSONArray?.summarizeProtocols(
+        labels: Map<String, String>,
+        activeTransportId: String,
+    ): List<String> {
+        if (this == null) {
+            return emptyList()
+        }
+
+        return buildList {
+            for (index in 0 until length()) {
+                val item = optJSONObject(index) ?: continue
+                val id = item.firstString("id", "protocol", "protocol_id", "transport")
+                if (id.isBlank()) {
+                    continue
+                }
+                val label = labels[id].orEmpty().ifBlank { id }
+                val parts = mutableListOf<String>()
+                if (id == activeTransportId || item.anyBoolean("active", "selected", "current")) {
+                    parts += "active"
+                }
+                item.firstPositiveDouble(*RTT_FIELDS).takeIf { it > 0.0 }?.let {
+                    parts += "${it.toInt()} ms"
+                }
+                item.firstPositiveDouble(*AGGREGATE_RATE_FIELDS).takeIf { it > 0.0 }?.let {
+                    parts += formatRate(it)
+                }
+                item.firstPositiveInt("failures", "failure_count", "consecutive_failures")
+                    ?.takeIf { it > 0 }
+                    ?.let { parts += "$it fail" }
+
+                add(
+                    if (parts.isEmpty()) {
+                        label
+                    } else {
+                        "$label: ${parts.joinToString(", ")}"
+                    },
+                )
+            }
+        }.take(MAX_DIAGNOSTIC_ROWS)
+    }
+
+    private fun JSONArray?.summarizeEndpoints(
+        labels: Map<String, String>,
+        activeRelayId: String,
+        activeTransportId: String,
+        retainMeasurements: Boolean,
+    ): List<String> {
+        if (this == null) {
+            return emptyList()
+        }
+
+        val rows = buildList {
+            for (index in 0 until length()) {
+                val item = optJSONObject(index) ?: continue
+                val relayId = item.firstString("relay_id", "relay", "relayId", "id")
+                val transportId = item
+                    .firstString("transport", "protocol", "protocol_id", "protocolId")
+                    .ifBlank {
+                        if (relayId == activeRelayId) {
+                            activeTransportId
+                        } else {
+                            ""
+                        }
+                    }
+                val label = labels[transportId].orEmpty().ifBlank { transportId }
+                val isCurrent = item.anyBoolean("active", "selected", "current") ||
+                    (relayId == activeRelayId && transportId == activeTransportId)
+                val name = buildList {
+                    if (relayId.isNotBlank()) add("relay $relayId")
+                    if (label.isNotBlank()) add(label)
+                }.joinToString(" / ").ifBlank { "endpoint ${index + 1}" }
+
+                val parts = mutableListOf<String>()
+                val cached = if (retainMeasurements) {
+                    cachedEndpointTelemetry(relayId, transportId)
+                } else {
+                    null
+                }
+                val rank = item.firstPositiveInt("rank") ?: cached?.rank
+                val score = item.firstPositiveDouble("score").ifZero { cached?.score ?: 0.0 }
+                val rttMs = item.firstPositiveDouble(*RTT_FIELDS).ifZero { cached?.rttMs ?: 0.0 }
+                val aggregateRate = item.firstPositiveDouble(*AGGREGATE_RATE_FIELDS)
+
+                rank?.let { parts += "rank $it" }
+                score.takeIf { it > 0.0 }?.let {
+                    parts += "score ${"%.2f".format(it)}"
+                }
+                rttMs.takeIf { it > 0.0 }?.let {
+                    parts += "${it.toInt()} ms"
+                }
+                aggregateRate.takeIf { it > 0.0 }?.let {
+                    parts += formatRate(it)
+                }
+                if (retainMeasurements) {
+                    rememberEndpointTelemetry(
+                        relayId = relayId,
+                        transportId = transportId,
+                        telemetry = EndpointTelemetry(
+                            rank = rank,
+                            score = score,
+                            rttMs = rttMs,
+                        ),
+                    )
+                }
+
+                add(
+                    EndpointDiagnosticRow(
+                        current = isCurrent,
+                        text = buildString {
+                            if (isCurrent) {
+                                append("current ")
+                            }
+                            append(name)
+                            if (parts.isNotEmpty()) {
+                                append(": ")
+                                append(parts.joinToString(", "))
+                            }
+                        },
+                    ),
+                )
+            }
+        }
+
+        return rows
+            .sortedByDescending { it.current }
+            .map { it.text }
+            .take(MAX_DIAGNOSTIC_ROWS)
+    }
+
+    private fun cachedEndpointTelemetry(
+        relayId: String,
+        transportId: String,
+    ): EndpointTelemetry? {
+        val key = EndpointDiagnosticKey.from(relayId, transportId) ?: return null
+        return synchronized(endpointTelemetryCache) {
+            endpointTelemetryCache[key]
+        }
+    }
+
+    private fun rememberEndpointTelemetry(
+        relayId: String,
+        transportId: String,
+        telemetry: EndpointTelemetry,
+    ) {
+        if (!telemetry.hasMeasurements) {
+            return
+        }
+        val key = EndpointDiagnosticKey.from(relayId, transportId) ?: return
+        synchronized(endpointTelemetryCache) {
+            endpointTelemetryCache[key] = telemetry
+        }
+    }
+
+    private fun clearEndpointTelemetryCache() {
+        synchronized(endpointTelemetryCache) {
+            endpointTelemetryCache.clear()
+        }
+    }
+
+    private fun JSONObject.firstString(vararg fields: String): String {
+        fields.forEach { field ->
+            val value = optString(field).trim()
+            if (value.isNotBlank()) {
+                return value
+            }
+        }
+        return ""
+    }
+
+    private fun JSONObject.anyBoolean(vararg fields: String): Boolean {
+        return fields.any { field ->
+            when (val raw = opt(field)) {
+                is Boolean -> raw
+                is Number -> raw.toInt() != 0
+                is String -> raw.equals("true", ignoreCase = true) ||
+                    raw == "1" ||
+                    raw.equals("yes", ignoreCase = true)
+                else -> false
+            }
+        }
+    }
+
+    private fun JSONObject.firstPositiveInt(vararg fields: String): Int? {
+        fields.forEach { field ->
+            val value = when (val raw = opt(field)) {
+                is Number -> raw.toInt()
+                is String -> raw.trim().toIntOrNull()
+                else -> null
+            }
+            if (value != null && value > 0) {
+                return value
+            }
+        }
+        return null
+    }
+
+    private fun Double.ifZero(fallback: () -> Double): Double {
+        return if (this > 0.0) this else fallback()
     }
 
     private fun doSwapTun(ip: String, maskBits: Int) {
@@ -410,7 +799,7 @@ class VpnCoreService : VpnService() {
         }
 
         if (shouldStop) {
-            stopVpn(removeNotification = true)
+            stopVpn(removeNotification = true, shutdownCore = true)
         }
     }
 
@@ -486,7 +875,7 @@ class VpnCoreService : VpnService() {
         return this
     }
 
-    private fun stopVpn(removeNotification: Boolean) {
+    private fun stopVpn(removeNotification: Boolean, shutdownCore: Boolean) {
         if (isStopRequested) {
             Log.d(TAG, "Ignoring duplicate stop request.")
             return
@@ -494,6 +883,7 @@ class VpnCoreService : VpnService() {
 
         Log.d(TAG, "Stopping active session.")
         isStopRequested = true
+        clearEndpointTelemetryCache()
         publishState(
             VpnRuntimeState(
                 status = VpnConnectionStatus.Stopping,
@@ -507,7 +897,12 @@ class VpnCoreService : VpnService() {
         serviceScope.launch {
             lifecycleMutex.withLock {
                 shutdownReconfigWorker()
-                val stopResult = runCatching { vpnCoreBridge.stop() }
+                val stopResult = runCatching {
+                    vpnCoreBridge.stop()
+                    if (shutdownCore) {
+                        vpnCoreBridge.shutdown()
+                    }
+                }
                 activeProfile = null
                 currentProfileSummary = ""
                 isStarting = false
@@ -621,7 +1016,11 @@ class VpnCoreService : VpnService() {
         }
 
         runCatching {
-            connectivityManager.registerDefaultNetworkCallback(networkCallback)
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                .build()
+            connectivityManager.registerNetworkCallback(request, networkCallback)
         }.onSuccess {
             isNetworkCallbackRegistered = true
         }.onFailure {
@@ -643,24 +1042,42 @@ class VpnCoreService : VpnService() {
     }
 
     private fun publishState(state: VpnRuntimeState) {
-        stateStore.set(state)
+        val publishedState = state.withRetainedDiagnostics()
+        stateStore.set(publishedState)
         runCatching {
             getSystemService(NotificationManager::class.java)
                 ?.notify(
                     VpnNotificationFactory.NOTIFICATION_ID,
-                    notificationFactory.create(state),
+                    notificationFactory.create(publishedState),
                 )
         }
     }
 
+    private fun VpnRuntimeState.withRetainedDiagnostics(): VpnRuntimeState {
+        if (status !in DIAGNOSTIC_RETAIN_STATES || activeProfile == null) {
+            return this
+        }
+
+        val previous = stateStore.state.value
+        return copy(
+            protocolDiagnostics = protocolDiagnostics.ifEmpty {
+                previous.protocolDiagnostics.takeIf(List<String>::isNotEmpty).orEmpty()
+            },
+            endpointDiagnostics = endpointDiagnostics.ifEmpty {
+                previous.endpointDiagnostics.takeIf(List<String>::isNotEmpty).orEmpty()
+            },
+        )
+    }
+
     override fun onRevoke() {
-        stopVpn(removeNotification = true)
+        stopVpn(removeNotification = true, shutdownCore = true)
     }
 
     override fun onDestroy() {
         shutdownReconfigWorker()
         unregisterPackageReceiver()
         unregisterNetworkCallback()
+        vpnCoreBridge.shutdown()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -673,6 +1090,49 @@ class VpnCoreService : VpnService() {
         private const val PLACEHOLDER_ADDRESS = "10.0.0.2"
         private const val PLACEHOLDER_PREFIX = 32
         private const val SWAPPED_PREFIX = 32
+        private const val MAX_DIAGNOSTIC_ROWS = 4
+        private val CONNECTING_STATES = setOf("vpn_connect", "connect", "connecting", "starting")
+        private val ACTIVE_STATES = setOf("vpn_connected", "connected", "degraded", "running")
+        private val INACTIVE_STATES = setOf("vpn_inactive", "inactive", "idle", "stopped")
+        private val FAILED_STATES = setOf("failed", "error")
+        private val DIAGNOSTIC_RETAIN_STATES = setOf(
+            VpnConnectionStatus.Starting,
+            VpnConnectionStatus.Running,
+        )
+        private val UPLOAD_RATE_FIELDS = arrayOf(
+            "upload_bps",
+            "upload_throughput_bps",
+            "uplink_bps",
+            "tx_bps",
+            "send_bps",
+        )
+        private val DOWNLOAD_RATE_FIELDS = arrayOf(
+            "download_bps",
+            "download_throughput_bps",
+            "downlink_bps",
+            "rx_bps",
+            "receive_bps",
+        )
+        private val AGGREGATE_RATE_FIELDS = arrayOf(
+            "aggregate_throughput_bps",
+            "throughput_bps",
+            "quick_probe_throughput_bps",
+            "bps",
+        )
+        private val RTT_FIELDS = arrayOf(
+            "rtt_ms",
+            "rtt",
+            "latency_ms",
+            "connect_latency_ms",
+        )
+        private val NESTED_METRIC_OBJECTS = arrayOf(
+            "metrics",
+            "measurement",
+            "measurements",
+            "quick_probe",
+            "probe",
+            "throughput",
+        )
 
         fun startIntent(context: Context): Intent {
             return Intent(context, VpnCoreService::class.java).setAction(ACTION_START)
@@ -693,5 +1153,79 @@ class VpnCoreService : VpnService() {
         } else {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_MANIFEST
         }
+    }
+}
+
+private fun String?.toTransportLabels(): Map<String, String> {
+    val rawJson = this?.trim().orEmpty()
+    if (rawJson.isBlank()) {
+        return emptyMap()
+    }
+
+    return runCatching {
+        val entries = if (rawJson.startsWith("[")) {
+            JSONArray(rawJson)
+        } else {
+            val root = JSONObject(rawJson)
+            root.optJSONArray("transports")
+                ?: root.optJSONArray("protocols")
+                ?: JSONArray()
+        }
+        buildMap {
+            for (index in 0 until entries.length()) {
+                val item = entries.optJSONObject(index) ?: continue
+                val id = item.optString("id").trim()
+                if (id.isBlank()) {
+                    continue
+                }
+                val label = item.optString("label").trim().ifBlank { id }
+                put(id, label)
+            }
+        }
+    }.getOrDefault(emptyMap())
+}
+
+private data class EndpointDiagnosticRow(
+    val current: Boolean,
+    val text: String,
+)
+
+private data class EndpointDiagnosticKey(
+    val relayId: String,
+    val transportId: String,
+) {
+    companion object {
+        fun from(
+            relayId: String,
+            transportId: String,
+        ): EndpointDiagnosticKey? {
+            val normalizedRelayId = relayId.trim()
+            val normalizedTransportId = transportId.trim()
+            if (normalizedRelayId.isBlank() && normalizedTransportId.isBlank()) {
+                return null
+            }
+            return EndpointDiagnosticKey(
+                relayId = normalizedRelayId,
+                transportId = normalizedTransportId,
+            )
+        }
+    }
+}
+
+private data class EndpointTelemetry(
+    val rank: Int?,
+    val score: Double,
+    val rttMs: Double,
+) {
+    val hasMeasurements: Boolean
+        get() = rank != null || score > 0.0 || rttMs > 0.0
+}
+
+private fun formatRate(bps: Double): String {
+    return when {
+        bps >= 1_000_000_000.0 -> "${"%.1f".format(bps / 1_000_000_000.0)} Gbps"
+        bps >= 1_000_000.0 -> "${"%.1f".format(bps / 1_000_000.0)} Mbps"
+        bps >= 1_000.0 -> "${"%.1f".format(bps / 1_000.0)} Kbps"
+        else -> "${bps.toInt()} bps"
     }
 }

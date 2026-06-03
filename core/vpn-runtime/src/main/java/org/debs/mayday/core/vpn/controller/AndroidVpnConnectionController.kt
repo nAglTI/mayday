@@ -34,9 +34,9 @@ class AndroidVpnConnectionController @Inject constructor(
             it.copy(
                 status = VpnConnectionStatus.Stopping,
                 headline = "Stopping VPN shell",
-                detail = "Closing TUN interface and foreground service.",
+                detail = "Detaching the TUN interface while keeping runner discovery alive.",
             )
         }
-        context.startService(VpnCoreService.stopIntent(context))
+        context.startService(VpnCoreService.disconnectIntent(context))
     }
 }

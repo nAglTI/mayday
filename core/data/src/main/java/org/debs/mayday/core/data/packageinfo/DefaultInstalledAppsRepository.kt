@@ -6,6 +6,7 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Build
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.debs.mayday.core.model.AppRiskScanResult
@@ -97,13 +98,19 @@ class DefaultInstalledAppsRepository @Inject constructor(
         return when (preparedScan) {
             is PreparedRiskScan.Cached -> preparedScan.risk
             is PreparedRiskScan.Pending -> {
-                val risk = withContext(Dispatchers.Default) {
-                    riskScanner.scan(
-                        packageName = packageName,
-                        versionCode = preparedScan.versionCode,
-                        requestedPermissions = preparedScan.requestedPermissions,
-                        apkPaths = preparedScan.apkPaths,
-                    )
+                val risk = try {
+                    withContext(Dispatchers.Default) {
+                        riskScanner.scan(
+                            packageName = packageName,
+                            versionCode = preparedScan.versionCode,
+                            requestedPermissions = preparedScan.requestedPermissions,
+                            apkPaths = preparedScan.apkPaths,
+                        )
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    return null
                 }
                 withContext(Dispatchers.IO) {
                     riskCacheStore.write(preparedScan.fingerprint, risk)

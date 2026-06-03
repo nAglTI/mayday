@@ -17,6 +17,7 @@ import org.jf.dexlib2.writer.io.MemoryDataStore
 import org.jf.dexlib2.writer.pool.DexPool
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -661,6 +662,22 @@ class InstalledAppRiskScannerTest {
 
         assertEquals(AppRiskLevel.CLEAN, result.riskLevel)
         assertEquals(0, result.riskScore)
+    }
+
+    @Test
+    fun scanFailsInsteadOfReturningCleanWhenNoApkCanBeRead() {
+        val missingApk = File(temporaryFolder.root, "missing.apk")
+
+        val error = assertThrows(IllegalStateException::class.java) {
+            scanner.scan(
+                packageName = "com.example.missing",
+                versionCode = 1,
+                requestedPermissions = emptyList(),
+                apkPaths = listOf(missingApk.path),
+            )
+        }
+
+        assertTrue(error.message.orEmpty().contains("Unable to scan APK contents"))
     }
 
     private fun apkWithEntry(

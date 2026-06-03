@@ -16,16 +16,25 @@ import kotlinx.coroutines.launch
 import org.debs.mayday.core.data.repository.UiPreferencesRepository
 import org.debs.mayday.core.data.repository.VpnConfigImportParser
 import org.debs.mayday.core.data.repository.VpnProfileRepository
+import org.debs.mayday.core.designsystem.theme.configNeedsNewKeyBody
 import org.debs.mayday.core.designsystem.theme.importedServersMessage
 import org.debs.mayday.core.designsystem.theme.maydayStrings
+import org.debs.mayday.core.gomobile.bridge.VpnCoreBridge
 import org.debs.mayday.core.model.AppDensity
 import org.debs.mayday.core.model.AppLanguage
 import org.debs.mayday.core.model.AppThemeMode
+import org.debs.mayday.core.model.NetworkRescueProfile
 import org.debs.mayday.core.model.UiPreferences
+import org.debs.mayday.core.model.VpnConnectionStatus
+import org.debs.mayday.core.model.VpnMetricsConfig
 import org.debs.mayday.core.model.VpnProfile
+import org.debs.mayday.core.model.VpnProfileCompatibilityValidator
 import org.debs.mayday.core.model.VpnRelayTarget
 import org.debs.mayday.core.model.VpnServerTarget
 import org.debs.mayday.core.model.VpnTransportMode
+import org.debs.mayday.core.vpn.controller.VpnConnectionController
+import org.json.JSONArray
+import org.json.JSONObject
 import javax.inject.Inject
 
 @HiltViewModel
@@ -33,6 +42,8 @@ class SettingsViewModel @Inject constructor(
     private val profileRepository: VpnProfileRepository,
     private val uiPreferencesRepository: UiPreferencesRepository,
     private val configImportParser: VpnConfigImportParser,
+    private val vpnCoreBridge: VpnCoreBridge,
+    private val connectionController: VpnConnectionController,
 ) : ViewModel() {
 
     private val mutableState = MutableStateFlow(
@@ -41,16 +52,25 @@ class SettingsViewModel @Inject constructor(
     val uiState: StateFlow<SettingsUiState> = mutableState.asStateFlow()
     private val effectChannel = Channel<SettingsUiEffect>(Channel.BUFFERED)
     val effect: Flow<SettingsUiEffect> = effectChannel.receiveAsFlow()
+    private var savedSnapshot: SettingsConfigSnapshot? = null
 
     init {
         viewModelScope.launch {
             uiPreferencesRepository.preferences.collectLatest { preferences ->
-                mutableState.update { it.copy(uiPreferences = preferences) }
+                update { copy(uiPreferences = preferences) }
             }
         }
         viewModelScope.launch {
             val profile = profileRepository.profile.first()
-            mutableState.value = profile.toUiState(uiPreferences = mutableState.value.uiPreferences)
+            val loadedState = profile.toUiState(
+                uiPreferences = mutableState.value.uiPreferences,
+                transportOptions = mutableState.value.transportOptions,
+            )
+            savedSnapshot = loadedState.toConfigSnapshot()
+            mutableState.value = loadedState.copy(hasUnsavedChanges = false)
+        }
+        viewModelScope.launch {
+            refreshTransportCatalog()
         }
     }
 
@@ -61,14 +81,10 @@ class SettingsViewModel @Inject constructor(
             SettingsUiEvent.OpenSplitClicked -> emitEffect(SettingsUiEffect.NavigateToSplit)
             SettingsUiEvent.OpenSemanticClicked -> emitEffect(SettingsUiEffect.NavigateToSemantic)
             SettingsUiEvent.SaveClicked -> save()
-            SettingsUiEvent.ImportClicked -> emitEffect(SettingsUiEffect.OpenConfigPicker)
             SettingsUiEvent.ImportClipboardClicked -> emitEffect(SettingsUiEffect.ImportFromClipboard)
             SettingsUiEvent.AddRelayClicked -> addRelay()
             SettingsUiEvent.AddServerClicked -> addServer()
             SettingsUiEvent.MessageShown -> update { copy(message = null) }
-            is SettingsUiEvent.ProfileNameChanged -> update {
-                copy(profileName = event.value, message = null)
-            }
             is SettingsUiEvent.TunNameChanged -> update {
                 copy(tunName = event.value, message = null)
             }
@@ -87,6 +103,27 @@ class SettingsViewModel @Inject constructor(
                     mtu = event.value.defaultMtu().toString(),
                     message = null,
                 )
+            }
+            is SettingsUiEvent.PrestartFullProbeChanged -> update {
+                copy(prestartFullProbe = event.value, message = null)
+            }
+            is SettingsUiEvent.SteadyStateQuickProbeChanged -> update {
+                copy(steadyStateQuickProbeEnabled = event.value, message = null)
+            }
+            is SettingsUiEvent.SteadyStateBenchmarkChanged -> update {
+                copy(steadyStateBenchmarkEnabled = event.value, message = null)
+            }
+            is SettingsUiEvent.NetworkRescueProfileChanged -> update {
+                copy(networkRescueProfile = event.value, message = null)
+            }
+            is SettingsUiEvent.DisableIpv6Changed -> update {
+                copy(disableIpv6 = event.value, message = null)
+            }
+            is SettingsUiEvent.PacketFragmentPayloadChanged -> update {
+                copy(packetFragmentPayloadBytes = event.value, message = null)
+            }
+            is SettingsUiEvent.DisablePacketBatchingChanged -> update {
+                copy(disablePacketBatching = event.value, message = null)
             }
             is SettingsUiEvent.AutoReconnectChanged -> update {
                 copy(autoReconnect = event.value, message = null)
@@ -108,9 +145,6 @@ class SettingsViewModel @Inject constructor(
             }
             is SettingsUiEvent.RelayShortIdChanged -> updateRelay(event.index) {
                 copy(shortId = event.value)
-            }
-            is SettingsUiEvent.RelayPortsChanged -> updateRelay(event.index) {
-                copy(ports = event.value)
             }
             is SettingsUiEvent.ServerIdChanged -> updateServer(event.index) {
                 copy(id = event.value)
@@ -138,6 +172,18 @@ class SettingsViewModel @Inject constructor(
                     selectedPackageCount = latestProfile.selectedPackages.size,
                 )
             }
+        }
+    }
+
+    private fun refreshTransportCatalog() {
+        val options = vpnCoreBridge.supportedTransportsJson()
+            .getOrNull()
+            .toTransportModeOptions()
+        if (options.isEmpty()) {
+            return
+        }
+        update {
+            copy(transportOptions = options.withFallbackForSelected(transportMode))
         }
     }
 
@@ -223,18 +269,25 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             update { copy(isLoading = true, message = null) }
             runCatching {
+                val latestProfile = profileRepository.profile.first()
                 configImportParser.parse(
                     rawConfig = rawConfig,
-                    currentProfileName = uiState.value.profileName,
+                    currentProfileName = latestProfile.profileName,
                 )
             }.onSuccess { profile ->
                 val uiPreferences = uiState.value.uiPreferences
-                mutableState.value = profile.toUiState(
+                val importedState = profile.toUiState(
                     uiPreferences = uiPreferences,
+                    transportOptions = uiState.value.transportOptions,
                     importedConfigName = sourceName,
                 ).copy(
                     message = strings().importedServersMessage(profile.servers.size),
                 )
+                mutableState.value = if (savedSnapshot == null) {
+                    importedState.copy(hasUnsavedChanges = true)
+                } else {
+                    importedState.withConfigChanges()
+                }
             }.onFailure { error ->
                 update {
                     copy(
@@ -247,17 +300,30 @@ class SettingsViewModel @Inject constructor(
     }
 
     private fun save() {
+        if (!uiState.value.hasUnsavedChanges) {
+            return
+        }
         viewModelScope.launch {
             update { copy(isLoading = true, message = null) }
             val currentState = uiState.value
             runCatching {
                 val latestProfile = profileRepository.profile.first()
+                val wasRunning = connectionController.state.value.status == VpnConnectionStatus.Running
                 val userId = currentState.userId.trim()
                 require(userId.toLongOrNull()?.let { it > 0 } == true) {
                     strings().userIdMustBeNonNegativeInteger
                 }
                 val serverFailbackDelaySec = parseServerFailbackDelay(
                     currentState.serverFailbackDelaySec,
+                )
+                val disableIpv6 = currentState.disableIpv6
+                val mtu = parseTunnelMtu(
+                    rawValue = currentState.mtu,
+                    transportMode = currentState.transportMode,
+                    disableIpv6 = disableIpv6,
+                )
+                val packetFragmentPayloadBytes = parsePacketFragmentPayloadBytes(
+                    currentState.packetFragmentPayloadBytes,
                 )
                 val relays = currentState.relays.mapIndexedNotNull { index, draft ->
                     val addr = draft.addr.trim()
@@ -268,7 +334,8 @@ class SettingsViewModel @Inject constructor(
                             id = draft.id.trim().ifBlank { "relay-${index + 1}" },
                             addr = addr,
                             shortId = draft.shortId.toIntOrNull()?.coerceAtLeast(1) ?: (index + 1),
-                            ports = parseRelayPorts(draft.ports, addr),
+                            relayKey = draft.relayKey.trim(),
+                            transportPorts = draft.transportPorts,
                         )
                     }
                 }.also { parsedRelays ->
@@ -296,7 +363,7 @@ class SettingsViewModel @Inject constructor(
                     server.copy(priority = index + 1)
                 }.also { require(it.isNotEmpty()) { strings().atLeastOneServerRequired } }
                 val savedProfile = VpnProfile(
-                    profileName = currentState.profileName.trim().ifEmpty { strings().profile },
+                    profileName = latestProfile.profileName,
                     relays = relays,
                     userId = userId,
                     servers = servers,
@@ -306,22 +373,44 @@ class SettingsViewModel @Inject constructor(
                         .map(String::trim)
                         .filter(String::isNotBlank)
                         .ifEmpty { listOf("1.1.1.1") },
-                    mtu = currentState.mtu.toIntOrNull() ?: currentState.transportMode.defaultMtu(),
+                    mtu = mtu,
                     serverFailbackDelaySec = serverFailbackDelaySec,
                     transportMode = currentState.transportMode,
+                    prestartFullProbe = currentState.prestartFullProbe,
+                    steadyStateQuickProbeEnabled = currentState.steadyStateQuickProbeEnabled,
+                    steadyStateBenchmarkEnabled = currentState.steadyStateBenchmarkEnabled,
+                    networkRescueProfile = currentState.networkRescueProfile,
+                    disableIpv6 = disableIpv6,
+                    packetFragmentPayloadBytes = packetFragmentPayloadBytes,
+                    disablePacketBatching = currentState.disablePacketBatching,
                     metrics = currentState.metrics,
                     splitTunnelMode = latestProfile.splitTunnelMode,
                     selectedPackages = latestProfile.selectedPackages,
                     isAutoReconnectEnabled = currentState.autoReconnect,
+                    preservedConfigJson = currentState.preservedConfigJson.ifBlank {
+                        latestProfile.preservedConfigJson
+                    },
                 )
-                profileRepository.save(savedProfile)
-            }.onSuccess {
-                update {
-                    copy(
-                        isLoading = false,
-                        message = strings().profileSaved,
-                    )
+                require(VpnProfileCompatibilityValidator.firstIssue(savedProfile) == null) {
+                    strings().configNeedsNewKeyBody
                 }
+                profileRepository.save(savedProfile)
+                if (wasRunning) {
+                    connectionController.stop()
+                    connectionController.start()
+                }
+                savedProfile
+            }.onSuccess { savedProfile ->
+                val savedState = savedProfile.toUiState(
+                    uiPreferences = uiState.value.uiPreferences,
+                    transportOptions = uiState.value.transportOptions,
+                )
+                savedSnapshot = savedState.toConfigSnapshot()
+                mutableState.value = savedState.copy(
+                    isLoading = false,
+                    hasUnsavedChanges = false,
+                    message = strings().profileSaved,
+                )
             }.onFailure { error ->
                 update {
                     copy(
@@ -344,7 +433,9 @@ class SettingsViewModel @Inject constructor(
     }
 
     private fun update(transform: SettingsUiState.() -> SettingsUiState) {
-        mutableState.update(transform)
+        mutableState.update { state ->
+            state.transform().withConfigChanges()
+        }
     }
 
     private fun updateRelay(index: Int, transform: RelayDraft.() -> RelayDraft) {
@@ -385,47 +476,43 @@ class SettingsViewModel @Inject constructor(
         return if (delay == 0) 60 else delay
     }
 
-    private fun parseRelayPorts(rawValue: String, addr: String): List<Int> {
-        val tokens = rawValue
-            .split(',', ';', ' ', '\n', '\t')
-            .map(String::trim)
-            .filter(String::isNotBlank)
-        if (tokens.isEmpty()) {
-            return addr.parseRelayPort()?.let(::listOf).orEmpty()
+    private fun parseTunnelMtu(
+        rawValue: String,
+        transportMode: VpnTransportMode,
+        disableIpv6: Boolean,
+    ): Int {
+        val value = rawValue.trim().ifBlank { transportMode.defaultMtu().toString() }.toIntOrNull()
+        val minMtu = if (disableIpv6) 100 else 1280
+        require(value != null && value in minMtu..1500) {
+            "tunnel_mtu must be ${minMtu}..1500."
         }
-
-        return tokens.map { token ->
-            val port = token.toIntOrNull()
-            require(port != null && port in 1..65535) {
-                strings().relayPortsInvalid
-            }
-            port
-        }.distinct()
+        return value
     }
 
-    private fun String.parseRelayPort(): Int? {
-        val separatorIndex = lastIndexOf(':')
-        if (separatorIndex <= 0 || separatorIndex == lastIndex) {
-            return null
+    private fun parsePacketFragmentPayloadBytes(rawValue: String): Int {
+        val value = rawValue.trim().ifBlank { "0" }.toIntOrNull()
+        require(value != null && (value == 0 || value in 64..65536)) {
+            "packet_fragment_payload_bytes must be 0 or 64..65536."
         }
-        return substring(separatorIndex + 1).trim().toIntOrNull()?.takeIf { it in 1..65535 }
+        return value
     }
 
     private fun strings() = maydayStrings(uiState.value.uiPreferences.language)
 
     private fun VpnProfile.toUiState(
         uiPreferences: UiPreferences,
+        transportOptions: List<TransportModeOption>,
         importedConfigName: String? = null,
     ): SettingsUiState {
         return SettingsUiState(
             uiPreferences = uiPreferences,
-            profileName = profileName,
             relays = relays.map {
                 RelayDraft(
                     id = it.id,
                     addr = it.addr,
                     shortId = it.shortId.toString(),
-                    ports = it.ports.joinToString(", "),
+                    relayKey = it.relayKey,
+                    transportPorts = it.transportPorts,
                 )
             }.ifEmpty { listOf(RelayDraft()) },
             userId = userId,
@@ -441,12 +528,63 @@ class SettingsViewModel @Inject constructor(
             mtu = mtu.toString(),
             serverFailbackDelaySec = serverFailbackDelaySec.toString(),
             transportMode = transportMode,
+            transportOptions = transportOptions.withFallbackForSelected(transportMode),
+            prestartFullProbe = prestartFullProbe,
+            steadyStateQuickProbeEnabled = steadyStateQuickProbeEnabled,
+            steadyStateBenchmarkEnabled = steadyStateBenchmarkEnabled,
+            networkRescueProfile = networkRescueProfile,
+            disableIpv6 = disableIpv6,
+            packetFragmentPayloadBytes = packetFragmentPayloadBytes.toString(),
+            disablePacketBatching = disablePacketBatching,
             metrics = metrics,
             autoReconnect = isAutoReconnectEnabled,
             splitTunnelMode = splitTunnelMode,
             selectedPackageCount = selectedPackages.size,
             isLoading = false,
             importedConfigName = importedConfigName,
+            preservedConfigJson = preservedConfigJson,
+        )
+    }
+
+    private fun SettingsUiState.withConfigChanges(): SettingsUiState {
+        val snapshot = savedSnapshot ?: return this
+        return copy(hasUnsavedChanges = toConfigSnapshot() != snapshot)
+    }
+
+    private fun SettingsUiState.toConfigSnapshot(): SettingsConfigSnapshot {
+        return SettingsConfigSnapshot(
+            relays = relays.map { relay ->
+                RelayConfigSnapshot(
+                    id = relay.id,
+                    addr = relay.addr,
+                    shortId = relay.shortId,
+                    relayKey = relay.relayKey,
+                    transportPorts = relay.transportPorts,
+                )
+            },
+            userId = userId,
+            servers = servers.map { server ->
+                ServerConfigSnapshot(
+                    id = server.id,
+                    key = server.key,
+                    priority = server.priority,
+                )
+            },
+            tunName = tunName,
+            dnsServers = dnsServers,
+            mtu = mtu,
+            serverFailbackDelaySec = serverFailbackDelaySec,
+            transportMode = transportMode,
+            prestartFullProbe = prestartFullProbe,
+            steadyStateQuickProbeEnabled = steadyStateQuickProbeEnabled,
+            steadyStateBenchmarkEnabled = steadyStateBenchmarkEnabled,
+            networkRescueProfile = networkRescueProfile,
+            disableIpv6 = disableIpv6,
+            packetFragmentPayloadBytes = packetFragmentPayloadBytes,
+            disablePacketBatching = disablePacketBatching,
+            metrics = metrics,
+            autoReconnect = autoReconnect,
+            preservedConfigJson = preservedConfigJson,
         )
     }
 
@@ -459,4 +597,92 @@ private fun List<ServerDraft>.reprioritized(): List<ServerDraft> {
     return mapIndexed { index, server ->
         server.copy(priority = (index + 1).toString())
     }
+}
+
+private data class SettingsConfigSnapshot(
+    val relays: List<RelayConfigSnapshot>,
+    val userId: String,
+    val servers: List<ServerConfigSnapshot>,
+    val tunName: String,
+    val dnsServers: String,
+    val mtu: String,
+    val serverFailbackDelaySec: String,
+    val transportMode: VpnTransportMode,
+    val prestartFullProbe: Boolean,
+    val steadyStateQuickProbeEnabled: Boolean,
+    val steadyStateBenchmarkEnabled: Boolean,
+    val networkRescueProfile: NetworkRescueProfile,
+    val disableIpv6: Boolean,
+    val packetFragmentPayloadBytes: String,
+    val disablePacketBatching: Boolean,
+    val metrics: VpnMetricsConfig,
+    val autoReconnect: Boolean,
+    val preservedConfigJson: String,
+)
+
+private data class RelayConfigSnapshot(
+    val id: String,
+    val addr: String,
+    val shortId: String,
+    val relayKey: String,
+    val transportPorts: Map<String, List<Int>>,
+)
+
+private data class ServerConfigSnapshot(
+    val id: String,
+    val key: String,
+    val priority: String,
+)
+
+private fun String?.toTransportModeOptions(): List<TransportModeOption> {
+    val rawJson = this?.trim().orEmpty()
+    if (rawJson.isBlank()) {
+        return emptyList()
+    }
+
+    return runCatching {
+        val entries = if (rawJson.startsWith("[")) {
+            JSONArray(rawJson)
+        } else {
+            val root = JSONObject(rawJson)
+            root.optJSONArray("transports")
+                ?: root.optJSONArray("protocols")
+                ?: JSONArray()
+        }
+
+        buildList {
+            for (index in 0 until entries.length()) {
+                val item = entries.optJSONObject(index) ?: continue
+                val id = item.firstString("id", "protocol", "protocol_id", "transport")
+                val mode = VpnTransportMode.fromRuntimeId(id) ?: continue
+                val label = item.firstString("label", "name", "title").ifBlank { mode.runtimeId }
+                add(TransportModeOption(mode = mode, label = label))
+            }
+        }.sortedByTransportOrder()
+    }.getOrDefault(emptyList())
+}
+
+private fun List<TransportModeOption>.withFallbackForSelected(
+    selected: VpnTransportMode,
+): List<TransportModeOption> {
+    val options = if (any { it.mode == selected }) {
+        this
+    } else {
+        this + TransportModeOption(mode = selected, label = selected.runtimeId)
+    }
+    return options.sortedByTransportOrder()
+}
+
+private fun List<TransportModeOption>.sortedByTransportOrder(): List<TransportModeOption> {
+    return distinctBy { it.mode }
+}
+
+private fun JSONObject.firstString(vararg names: String): String {
+    names.forEach { name ->
+        val value = optString(name).trim()
+        if (value.isNotBlank()) {
+            return value
+        }
+    }
+    return ""
 }

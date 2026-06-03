@@ -18,7 +18,7 @@ internal data class RiskStringRule(
 )
 
 internal object AppRiskRules {
-    const val RULES_VERSION = 15
+    const val RULES_VERSION = 16
     const val TUNNEL_INTERFACE_INDICATOR = "tun/ppp/tap/pptp/wg interface name"
 
     val knownApps = listOf(

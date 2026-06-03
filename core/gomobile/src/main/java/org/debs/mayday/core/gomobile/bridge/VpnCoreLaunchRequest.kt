@@ -4,12 +4,17 @@ data class VpnCoreLaunchRequest(
     val tunFileDescriptor: Int,
     val configJson: String,
     val socketProtector: SocketProtector,
+    val statusHandler: StatusHandler,
     val tunReconfigurator: TunReconfigurator,
     val packageResolver: PackageResolver?
 )
 
 fun interface SocketProtector {
     fun protect(socketFd: Int): Boolean
+}
+
+fun interface StatusHandler {
+    fun onStatus(statusJson: String)
 }
 
 fun interface TunReconfigurator {

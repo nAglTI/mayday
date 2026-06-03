@@ -31,6 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import org.debs.mayday.core.designsystem.component.MaydayActionButton
 import org.debs.mayday.core.designsystem.component.MaydayScreenBackground
@@ -38,13 +39,17 @@ import org.debs.mayday.core.designsystem.component.MaydaySectionTitle
 import org.debs.mayday.core.designsystem.component.MaydaySurfaceCard
 import org.debs.mayday.core.designsystem.component.MaydayTextField
 import org.debs.mayday.core.designsystem.theme.LocalMaydayDensity
+import org.debs.mayday.core.designsystem.theme.MaydayTheme
 import org.debs.mayday.core.designsystem.theme.cancel
-import org.debs.mayday.core.designsystem.theme.configText
 import org.debs.mayday.core.designsystem.theme.importClipboard
-import org.debs.mayday.core.designsystem.theme.importText
+import org.debs.mayday.core.designsystem.theme.importKey
+import org.debs.mayday.core.designsystem.theme.importKeyText
 import org.debs.mayday.core.designsystem.theme.maydayStrings
 import org.debs.mayday.core.designsystem.theme.onboardingClipboardHint
 import org.debs.mayday.core.designsystem.theme.onboardingTextImportHint
+import org.debs.mayday.core.model.AppLanguage
+import org.debs.mayday.core.model.AppThemeMode
+import org.debs.mayday.core.model.UiPreferences
 
 @Composable
 internal fun OnboardingScreen(
@@ -55,7 +60,7 @@ internal fun OnboardingScreen(
     val density = LocalMaydayDensity.current
     val snackbarHostState = remember { SnackbarHostState() }
     var showTextImportDialog by remember { mutableStateOf(false) }
-    var configTextInput by remember { mutableStateOf("") }
+    var importKeyInput by remember { mutableStateOf("") }
 
     LaunchedEffect(state.message) {
         val message = state.message ?: return@LaunchedEffect
@@ -66,27 +71,27 @@ internal fun OnboardingScreen(
     if (showTextImportDialog) {
         AlertDialog(
             onDismissRequest = { showTextImportDialog = false },
-            title = { Text(text = strings.importText) },
+            title = { Text(text = strings.importKey) },
             text = {
                 MaydayTextField(
-                    label = strings.configText,
-                    value = configTextInput,
-                    onValueChange = { configTextInput = it },
+                    label = strings.importKeyText,
+                    value = importKeyInput,
+                    onValueChange = { importKeyInput = it },
                     modifier = Modifier.heightIn(min = 160.dp),
                     singleLine = false,
                 )
             },
             confirmButton = {
                 TextButton(
-                    enabled = configTextInput.isNotBlank(),
+                    enabled = importKeyInput.isNotBlank(),
                     onClick = {
-                        val rawConfig = configTextInput
-                        configTextInput = ""
+                        val rawConfig = importKeyInput
+                        importKeyInput = ""
                         showTextImportDialog = false
                         onEvent(
                             OnboardingUiEvent.ConfigSelected(
                                 rawConfig = rawConfig,
-                                sourceName = strings.configText,
+                                sourceName = strings.importKey,
                             ),
                         )
                     },
@@ -146,10 +151,10 @@ internal fun OnboardingScreen(
                 MaydaySectionTitle(text = strings.importConfig)
 
                 OnboardingOptionCard(
-                    title = strings.importFile,
-                    subtitle = strings.onboardingImportHint,
+                    title = strings.importKey,
+                    subtitle = strings.onboardingTextImportHint,
                     badge = "01",
-                    onClick = { onEvent(OnboardingUiEvent.ImportClicked) },
+                    onClick = { showTextImportDialog = true },
                 )
                 OnboardingOptionCard(
                     title = strings.importClipboard,
@@ -158,21 +163,9 @@ internal fun OnboardingScreen(
                     onClick = { onEvent(OnboardingUiEvent.ImportClipboardClicked) },
                 )
                 OnboardingOptionCard(
-                    title = strings.importText,
-                    subtitle = strings.onboardingTextImportHint,
-                    badge = "03",
-                    onClick = { showTextImportDialog = true },
-                )
-                OnboardingOptionCard(
-                    title = strings.manual,
-                    subtitle = strings.onboardingManualHint,
-                    badge = "04",
-                    onClick = { onEvent(OnboardingUiEvent.ManualSetupClicked) },
-                )
-                OnboardingOptionCard(
                     title = strings.continueLabel,
                     subtitle = strings.onboardingContinueHint,
-                    badge = "05",
+                    badge = "03",
                     onClick = { onEvent(OnboardingUiEvent.ContinueClicked) },
                 )
 
@@ -242,4 +235,56 @@ private fun OnboardingOptionCard(
             filled = false,
         )
     }
+}
+
+@Preview(name = "Onboarding / Import Options", showBackground = true, widthDp = 390, heightDp = 844)
+@Composable
+private fun OnboardingImportOptionsPreview() {
+    OnboardingScreenPreview(
+        state = OnboardingUiState(
+            uiPreferences = previewOnboardingPreferences(
+                themeMode = AppThemeMode.DARK,
+                language = AppLanguage.EN,
+            ),
+            isLoading = false,
+        ),
+    )
+}
+
+@Preview(name = "Onboarding / Preparing RU", showBackground = true, widthDp = 390, heightDp = 844)
+@Composable
+private fun OnboardingPreparingRuPreview() {
+    OnboardingScreenPreview(
+        state = OnboardingUiState(
+            uiPreferences = previewOnboardingPreferences(
+                themeMode = AppThemeMode.LIGHT,
+                language = AppLanguage.RU,
+            ),
+            isLoading = true,
+        ),
+    )
+}
+
+@Composable
+private fun OnboardingScreenPreview(state: OnboardingUiState) {
+    MaydayTheme(
+        themeMode = state.uiPreferences.themeMode,
+        language = state.uiPreferences.language,
+        density = state.uiPreferences.density,
+    ) {
+        OnboardingScreen(
+            state = state,
+            onEvent = {},
+        )
+    }
+}
+
+private fun previewOnboardingPreferences(
+    themeMode: AppThemeMode,
+    language: AppLanguage,
+): UiPreferences {
+    return UiPreferences(
+        themeMode = themeMode,
+        language = language,
+    )
 }
