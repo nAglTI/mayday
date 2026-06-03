@@ -2,14 +2,10 @@ package org.debs.mayday.feature.settings
 
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
-import android.provider.OpenableColumns
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -30,43 +26,6 @@ import androidx.core.net.toUri
 class SettingsFragment : Fragment() {
 
     private val viewModel: SettingsViewModel by viewModels()
-
-    private val importConfigLauncher = registerForActivityResult(
-        ActivityResultContracts.OpenDocument(),
-    ) { uri: Uri? ->
-        uri ?: return@registerForActivityResult
-
-        val context = requireContext()
-        val strings = maydayStrings(viewModel.uiState.value.uiPreferences.language)
-        runCatching {
-            context.contentResolver.takePersistableUriPermission(
-                uri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION,
-            )
-        }
-
-        val sourceName = resolveDisplayName(uri)
-        val rawConfig = runCatching {
-            context.contentResolver.openInputStream(uri)
-                ?.bufferedReader()
-                ?.use { it.readText() }
-                ?: error(strings.unableToOpenSelectedConfigFile)
-        }.getOrElse { error ->
-            viewModel.onEvent(
-                SettingsUiEvent.ImportSelectionFailed(
-                    error.message ?: strings.failedReadSelectedFile,
-                ),
-            )
-            return@registerForActivityResult
-        }
-
-        viewModel.onEvent(
-            SettingsUiEvent.ConfigSelected(
-                rawConfig = rawConfig,
-                sourceName = sourceName,
-            ),
-        )
-    }
 
     override fun onResume() {
         super.onResume()
@@ -94,8 +53,8 @@ class SettingsFragment : Fragment() {
                                 SettingsUiEffect.NavigateToSplit -> {
                                     findNavController().navigate("mayday://split".toUri())
                                 }
-                                SettingsUiEffect.OpenConfigPicker -> {
-                                    importConfigLauncher.launch(arrayOf("*/*"))
+                                SettingsUiEffect.NavigateToSemantic -> {
+                                    findNavController().navigate("mayday://semantic".toUri())
                                 }
                                 SettingsUiEffect.ImportFromClipboard -> importConfigFromClipboard()
                             }
@@ -108,19 +67,6 @@ class SettingsFragment : Fragment() {
                 }
             }
         }
-    }
-
-    private fun resolveDisplayName(uri: Uri): String? {
-        val resolver = requireContext().contentResolver
-        return resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-            ?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    cursor.getString(0)
-                } else {
-                    null
-                }
-            }
-            ?: uri.lastPathSegment
     }
 
     private fun importConfigFromClipboard() {

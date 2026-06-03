@@ -3,24 +3,31 @@ package org.debs.mayday.feature.settings
 import org.debs.mayday.core.model.AppDensity
 import org.debs.mayday.core.model.AppLanguage
 import org.debs.mayday.core.model.AppThemeMode
+import org.debs.mayday.core.model.NetworkRescueProfile
 import org.debs.mayday.core.model.VpnTransportMode
 
 sealed interface SettingsUiEvent {
     data object BackClicked : SettingsUiEvent
     data object RefreshRequested : SettingsUiEvent
     data object OpenSplitClicked : SettingsUiEvent
+    data object OpenSemanticClicked : SettingsUiEvent
     data object SaveClicked : SettingsUiEvent
-    data object ImportClicked : SettingsUiEvent
     data object ImportClipboardClicked : SettingsUiEvent
     data object AddRelayClicked : SettingsUiEvent
     data object AddServerClicked : SettingsUiEvent
     data object MessageShown : SettingsUiEvent
-    data class ProfileNameChanged(val value: String) : SettingsUiEvent
     data class TunNameChanged(val value: String) : SettingsUiEvent
     data class DnsChanged(val value: String) : SettingsUiEvent
     data class MtuChanged(val value: String) : SettingsUiEvent
     data class ServerFailbackDelayChanged(val value: String) : SettingsUiEvent
     data class TransportModeChanged(val value: VpnTransportMode) : SettingsUiEvent
+    data class PrestartFullProbeChanged(val value: Boolean) : SettingsUiEvent
+    data class SteadyStateQuickProbeChanged(val value: Boolean) : SettingsUiEvent
+    data class SteadyStateBenchmarkChanged(val value: Boolean) : SettingsUiEvent
+    data class NetworkRescueProfileChanged(val value: NetworkRescueProfile) : SettingsUiEvent
+    data class DisableIpv6Changed(val value: Boolean) : SettingsUiEvent
+    data class PacketFragmentPayloadChanged(val value: String) : SettingsUiEvent
+    data class DisablePacketBatchingChanged(val value: Boolean) : SettingsUiEvent
     data class AutoReconnectChanged(val value: Boolean) : SettingsUiEvent
     data class ThemeModeChanged(val value: AppThemeMode) : SettingsUiEvent
     data class LanguageChanged(val value: AppLanguage) : SettingsUiEvent
@@ -40,10 +47,6 @@ sealed interface SettingsUiEvent {
         val value: String,
     ) : SettingsUiEvent
     data class RelayShortIdChanged(
-        val index: Int,
-        val value: String,
-    ) : SettingsUiEvent
-    data class RelayPortsChanged(
         val index: Int,
         val value: String,
     ) : SettingsUiEvent
@@ -71,6 +74,6 @@ sealed interface SettingsUiEvent {
 sealed interface SettingsUiEffect {
     data object NavigateBack : SettingsUiEffect
     data object NavigateToSplit : SettingsUiEffect
-    data object OpenConfigPicker : SettingsUiEffect
+    data object NavigateToSemantic : SettingsUiEffect
     data object ImportFromClipboard : SettingsUiEffect
 }

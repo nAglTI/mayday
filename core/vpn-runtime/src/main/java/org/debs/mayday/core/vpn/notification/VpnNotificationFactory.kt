@@ -64,6 +64,7 @@ class VpnNotificationFactory @Inject constructor(
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setGroup(GROUP_KEY)
         pendingIntent?.let(builder::setContentIntent)
         actionFor(state)?.let(builder::addAction)
         return builder.build()
@@ -86,8 +87,7 @@ class VpnNotificationFactory @Inject constructor(
     private fun actionFor(state: VpnRuntimeState): NotificationCompat.Action? {
         return when (state.status) {
             VpnConnectionStatus.Starting,
-            VpnConnectionStatus.Running,
-            -> NotificationCompat.Action.Builder(
+            VpnConnectionStatus.Running -> NotificationCompat.Action.Builder(
                 R.drawable.ic_mayday_disconnect,
                 context.getString(R.string.mayday_vpn_action_disconnect),
                 PendingIntent.getService(
@@ -99,8 +99,7 @@ class VpnNotificationFactory @Inject constructor(
             ).build()
             VpnConnectionStatus.Idle,
             VpnConnectionStatus.CoreMissing,
-            VpnConnectionStatus.Error,
-            -> NotificationCompat.Action.Builder(
+            VpnConnectionStatus.Error -> NotificationCompat.Action.Builder(
                 R.drawable.ic_mayday_connect,
                 context.getString(R.string.mayday_vpn_action_connect),
                 PendingIntent.getForegroundService(
@@ -117,6 +116,7 @@ class VpnNotificationFactory @Inject constructor(
     companion object {
         const val CHANNEL_ID = "mayday.runtime"
         const val NOTIFICATION_ID = 4040
+        private const val GROUP_KEY = "org.debs.mayday.notification.RUNTIME"
         private const val REQUEST_CONNECT = 1002
         private const val REQUEST_DISCONNECT = 1003
     }

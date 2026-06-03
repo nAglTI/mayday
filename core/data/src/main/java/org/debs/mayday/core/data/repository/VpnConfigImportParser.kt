@@ -1,10 +1,10 @@
 package org.debs.mayday.core.data.repository
 
-import android.net.Uri
-import android.util.Base64
 import org.debs.mayday.core.model.SplitTunnelMode
+import org.debs.mayday.core.model.NetworkRescueProfile
 import org.debs.mayday.core.model.VpnMetricsConfig
 import org.debs.mayday.core.model.VpnProfile
+import org.debs.mayday.core.model.VpnProfileCompatibilityValidator
 import org.debs.mayday.core.model.VpnRelayTarget
 import org.debs.mayday.core.model.VpnServerTarget
 import org.debs.mayday.core.model.VpnTransportMode
@@ -13,6 +13,7 @@ import org.json.JSONObject
 import org.yaml.snakeyaml.LoaderOptions
 import org.yaml.snakeyaml.Yaml
 import org.yaml.snakeyaml.constructor.SafeConstructor
+import java.util.Base64
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -20,25 +21,28 @@ import javax.inject.Singleton
 class VpnConfigImportParser @Inject constructor() {
 
     fun parse(rawConfig: String, currentProfileName: String = "Imported"): VpnProfile {
-        val trimmed = rawConfig.decodeMaydayImportConfig().trim()
-        require(trimmed.isNotBlank()) { "Config file is empty." }
-
-        return if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-            parseJson(trimmed, currentProfileName)
-        } else {
-            parseYaml(trimmed, currentProfileName)
+        val trimmed = rawConfig.decodeMaydayImportKey().trim()
+        require(trimmed.isNotBlank()) { "Import key is empty." }
+        return parseDecodedConfig(trimmed, currentProfileName).also { profile ->
+            require(VpnProfileCompatibilityValidator.firstIssue(profile) == null) {
+                "Import key is not compatible with the current VPN core. Please get a new key."
+            }
         }
     }
 
-    private fun String.decodeMaydayImportConfig(): String {
-        val payload = trim().extractMaydayImportPayload() ?: return trim()
-        val compactPayload = Uri.decode(payload).filterNot { it.isWhitespace() }
+    private fun String.decodeMaydayImportKey(): String {
+        val rawInput = trim()
+        val payload = rawInput.extractMaydayImportPayload() ?: rawInput
+        val compactPayload = payload.percentDecode().filterNot { it.isWhitespace() }
         require(compactPayload.isNotBlank()) { "Import key is empty." }
+        require(BASE64_PAYLOAD_PATTERN.matches(compactPayload)) {
+            "Import key must be a Base64 Mayday import key."
+        }
 
         val paddedPayload = compactPayload.withBase64Padding()
         var decodedBytes: ByteArray? = null
-        for (flags in BASE64_FLAGS) {
-            decodedBytes = runCatching { Base64.decode(paddedPayload, flags) }.getOrNull()
+        for (decoder in BASE64_DECODERS) {
+            decodedBytes = runCatching { decoder.decode(paddedPayload) }.getOrNull()
             if (decodedBytes != null) {
                 break
             }
@@ -67,7 +71,7 @@ class VpnConfigImportParser @Inject constructor() {
                     continue
                 }
 
-                val name = Uri.decode(parameter.substring(0, separatorIndex))
+                val name = parameter.substring(0, separatorIndex).percentDecode()
                 if (
                     name.equals("config", ignoreCase = true) ||
                     name.equals("payload", ignoreCase = true)
@@ -86,50 +90,98 @@ class VpnConfigImportParser @Inject constructor() {
         return null
     }
 
+    private fun String.percentDecode(): String {
+        if (!contains('%')) {
+            return this
+        }
+
+        val result = StringBuilder(length)
+        var index = 0
+        while (index < length) {
+            val char = this[index]
+            if (char == '%' && index + 2 < length) {
+                val hexValue = substring(index + 1, index + 3).toIntOrNull(radix = 16)
+                if (hexValue != null) {
+                    result.append(hexValue.toChar())
+                    index += 3
+                    continue
+                }
+            }
+            result.append(char)
+            index += 1
+        }
+        return result.toString()
+    }
+
     private fun String.withBase64Padding(): String {
         val missingPadding = (BASE64_GROUP_SIZE - length % BASE64_GROUP_SIZE) % BASE64_GROUP_SIZE
         return if (missingPadding == 0) this else this + "=".repeat(missingPadding)
     }
 
+    private fun parseDecodedConfig(rawConfig: String, currentProfileName: String): VpnProfile {
+        return if (rawConfig.startsWith("{")) {
+            parseJson(rawConfig, currentProfileName)
+        } else {
+            parseYaml(rawConfig, currentProfileName)
+        }
+    }
+
     private fun parseJson(rawConfig: String, currentProfileName: String): VpnProfile {
         val json = JSONObject(rawConfig)
+        val transportMode = parseTransportMode(json.optJSONObject("transport")?.opt("mode"))
         return profileFromMap(
             profileName = currentProfileName,
-            relays = json.optJSONArray("relays"),
-            relay = json.optString("relay"),
+            relays = json.optJSONArray("discovery_relays"),
             userId = json.opt("user_id")?.toString().orEmpty(),
             tunName = json.optString("tun_name"),
             dns = json.optString("dns"),
             serverFailbackDelaySec = normalizeServerFailbackDelay(
                 json.opt("server_failback_delay_sec"),
             ),
-            transportMode = parseTransportMode(json.optJSONObject("transport")?.opt("mode")),
+            tunnelMtu = normalizeTunnelMtu(
+                rawMtu = json.opt("tunnel_mtu"),
+                transportMode = transportMode,
+                disableIpv6 = json.opt("disable_ipv6").toBoolean(default = false),
+            ),
+            transportMode = transportMode,
+            prestartFullProbe = json.opt("prestart_full_probe").toBoolean(default = false),
+            steadyStateQuickProbeEnabled = json.opt("steady_state_quick_probe_enabled").toBoolean(default = false),
+            steadyStateBenchmarkEnabled = json.opt("steady_state_benchmark_enabled").toBoolean(default = false),
+            networkRescueProfile = parseNetworkRescue(json.optJSONObject("network_rescue")),
+            disableIpv6 = json.opt("disable_ipv6").toBoolean(default = false),
+            packetFragmentPayloadBytes = normalizePacketFragmentPayloadBytes(
+                json.opt("packet_fragment_payload_bytes"),
+            ),
+            disablePacketBatching = json.opt("disable_packet_batching").toBoolean(default = false),
             metrics = parseMetrics(json.optJSONObject("metrics")),
             servers = json.optJSONArray("servers") ?: JSONArray(),
             splitTunnel = json.optJSONObject("split_tunnel"),
+            preservedConfigJson = json.toString(),
         )
     }
 
     private fun parseYaml(rawConfig: String, currentProfileName: String): VpnProfile {
         val yaml = Yaml(SafeConstructor(LoaderOptions())).load<Any?>(rawConfig)
-        require(yaml is Map<*, *>) { "Unsupported YAML structure." }
+        require(yaml is Map<*, *>) { "Import key must decode to a YAML or JSON config." }
+        val preservedConfigJson = yaml.toJsonObject().toString()
 
         val relays = JSONArray()
-        (yaml["relays"] as? List<*>)?.forEachIndexed { index, item ->
+        (yaml["discovery_relays"] as? List<*>)?.forEachIndexed { index, item ->
             if (item is Map<*, *>) {
                 relays.put(
                     JSONObject()
                         .put("id", item["id"]?.toString().orEmpty().ifBlank { "relay-${index + 1}" })
                         .put("addr", item["addr"]?.toString().orEmpty())
-                        .put("short_id", item["short_id"]?.toString()?.toIntOrNull() ?: (index + 1))
-                        .put("ports", (item["ports"] as? List<*>).toJsonArray()),
+                        .put("short_id", item["short_id"].toIntOrNull(default = index + 1))
+                        .put("relay_key", item["relay_key"]?.toString().orEmpty())
+                        .put(
+                            "transport_ports",
+                            (item["transport_ports"] as? Map<*, *>)?.toJsonObject() ?: JSONObject(),
+                        )
                 )
             }
         }
-        val relay = yaml["relay"]?.toString().orEmpty()
-        val userId = yaml["user_id"]?.toString().orEmpty()
-        val tunName = yaml["tun_name"]?.toString().orEmpty()
-        val dns = yaml["dns"]?.toString().orEmpty()
+
         val transport = yaml["transport"] as? Map<*, *>
         val servers = JSONArray()
         (yaml["servers"] as? List<*>)?.forEach { item ->
@@ -138,56 +190,80 @@ class VpnConfigImportParser @Inject constructor() {
                     JSONObject()
                         .put("id", item["id"]?.toString().orEmpty())
                         .put("key", item["key"]?.toString().orEmpty())
-                        .put("priority", item["priority"]?.toString()?.toIntOrNull() ?: 1),
+                        .put("priority", item["priority"].toIntOrNull(default = 1)),
                 )
             }
         }
         val splitTunnel = (yaml["split_tunnel"] as? Map<*, *>)?.let { split ->
             JSONObject()
                 .put("enabled", split["enabled"].toBoolean(default = false))
-                .put("mode", split["mode"]?.toString().orEmpty())
+                .put("apps_mode", split["apps_mode"]?.toString() ?: split["mode"]?.toString().orEmpty())
                 .put(
                     "apps_android",
                     JSONArray((split["apps_android"] as? List<*>)?.map { it.toString() }.orEmpty()),
                 )
         }
+        val transportMode = parseTransportMode(transport?.get("mode"))
+        val disableIpv6 = yaml["disable_ipv6"].toBoolean(default = false)
 
         return profileFromMap(
             profileName = currentProfileName,
             relays = relays,
-            relay = relay,
-            userId = userId,
-            tunName = tunName,
-            dns = dns,
+            userId = yaml["user_id"]?.toString().orEmpty(),
+            tunName = yaml["tun_name"]?.toString().orEmpty(),
+            dns = yaml["dns"]?.toString().orEmpty(),
             serverFailbackDelaySec = normalizeServerFailbackDelay(yaml["server_failback_delay_sec"]),
-            transportMode = parseTransportMode(transport?.get("mode")),
+            tunnelMtu = normalizeTunnelMtu(
+                rawMtu = yaml["tunnel_mtu"],
+                transportMode = transportMode,
+                disableIpv6 = disableIpv6,
+            ),
+            transportMode = transportMode,
+            prestartFullProbe = yaml["prestart_full_probe"].toBoolean(default = false),
+            steadyStateQuickProbeEnabled = yaml["steady_state_quick_probe_enabled"].toBoolean(default = false),
+            steadyStateBenchmarkEnabled = yaml["steady_state_benchmark_enabled"].toBoolean(default = false),
+            networkRescueProfile = parseNetworkRescue(yaml["network_rescue"] as? Map<*, *>),
+            disableIpv6 = disableIpv6,
+            packetFragmentPayloadBytes = normalizePacketFragmentPayloadBytes(
+                yaml["packet_fragment_payload_bytes"],
+            ),
+            disablePacketBatching = yaml["disable_packet_batching"].toBoolean(default = false),
             metrics = parseMetrics(yaml["metrics"] as? Map<*, *>),
             servers = servers,
             splitTunnel = splitTunnel,
+            preservedConfigJson = preservedConfigJson,
         )
     }
 
     private fun profileFromMap(
         profileName: String,
         relays: JSONArray?,
-        relay: String,
         userId: String,
         tunName: String,
         dns: String,
         serverFailbackDelaySec: Int,
+        tunnelMtu: Int,
         transportMode: VpnTransportMode,
+        prestartFullProbe: Boolean,
+        steadyStateQuickProbeEnabled: Boolean,
+        steadyStateBenchmarkEnabled: Boolean,
+        networkRescueProfile: NetworkRescueProfile,
+        disableIpv6: Boolean,
+        packetFragmentPayloadBytes: Int,
+        disablePacketBatching: Boolean,
         metrics: VpnMetricsConfig,
         servers: JSONArray,
         splitTunnel: JSONObject?,
+        preservedConfigJson: String,
     ): VpnProfile {
         require(userId.isNotBlank()) { "user_id is required." }
         require(userId.toLongOrNull()?.let { it > 0 } == true) {
             "user_id must be a positive integer."
         }
-        val importedRelays = parseRelays(relays, relay)
-        require(importedRelays.isNotEmpty()) { "relays[] must contain at least one relay." }
+        val importedRelays = parseRelays(relays)
+        require(importedRelays.isNotEmpty()) { "discovery_relays[] must contain at least one relay." }
         require(importedRelays.map { it.shortId }.distinct().size == importedRelays.size) {
-            "relays[].short_id values must be unique."
+            "discovery_relays[].short_id values must be unique."
         }
         val importedServers = buildList {
             for (index in 0 until servers.length()) {
@@ -211,7 +287,11 @@ class VpnConfigImportParser @Inject constructor() {
         }
         require(importedServers.isNotEmpty()) { "servers[] must contain at least one server." }
 
-        val splitMode = when (splitTunnel?.optString("mode").orEmpty()) {
+        val splitMode = when (
+            splitTunnel?.optString("apps_mode").orEmpty().ifBlank {
+                splitTunnel?.optString("mode").orEmpty()
+            }
+        ) {
             "whitelist" -> SplitTunnelMode.ONLY_SELECTED
             "blacklist" -> SplitTunnelMode.EXCLUDE_SELECTED
             else -> SplitTunnelMode.DISABLED
@@ -232,9 +312,16 @@ class VpnConfigImportParser @Inject constructor() {
             dnsServers = dns.split(',').map(String::trim).filter(String::isNotBlank).ifEmpty {
                 listOf("1.1.1.1")
             },
-            mtu = transportMode.defaultMtu(),
+            mtu = tunnelMtu,
             serverFailbackDelaySec = serverFailbackDelaySec,
             transportMode = transportMode,
+            prestartFullProbe = prestartFullProbe,
+            steadyStateQuickProbeEnabled = steadyStateQuickProbeEnabled,
+            steadyStateBenchmarkEnabled = steadyStateBenchmarkEnabled,
+            networkRescueProfile = networkRescueProfile,
+            disableIpv6 = disableIpv6,
+            packetFragmentPayloadBytes = packetFragmentPayloadBytes,
+            disablePacketBatching = disablePacketBatching,
             metrics = metrics,
             splitTunnelMode = if (splitTunnel?.optBoolean("enabled", false) == true) {
                 splitMode
@@ -242,12 +329,13 @@ class VpnConfigImportParser @Inject constructor() {
                 SplitTunnelMode.DISABLED
             },
             selectedPackages = selectedPackages,
+            preservedConfigJson = preservedConfigJson,
         )
     }
 
-    private fun parseRelays(relays: JSONArray?, legacyRelay: String): List<VpnRelayTarget> {
-        val importedRelays = buildList {
-            val array = relays ?: JSONArray()
+    private fun parseRelays(relays: JSONArray?): List<VpnRelayTarget> {
+        val array = relays ?: JSONArray()
+        return buildList {
             for (index in 0 until array.length()) {
                 val item = array.optJSONObject(index) ?: continue
                 val addr = item.optString("addr").trim()
@@ -259,30 +347,12 @@ class VpnConfigImportParser @Inject constructor() {
                         id = item.optString("id").trim().ifBlank { "relay-${index + 1}" },
                         addr = addr,
                         shortId = item.optInt("short_id", index + 1).coerceAtLeast(1),
-                        ports = item.optJSONArray("ports").parsePorts().ifEmpty {
-                            addr.parseRelayPort()?.let(::listOf).orEmpty()
-                        },
+                        relayKey = item.optString("relay_key").trim(),
+                        transportPorts = item.optJSONObject("transport_ports").parseTransportPorts(),
                     ),
                 )
             }
         }
-        if (importedRelays.isNotEmpty()) {
-            return importedRelays
-        }
-
-        val normalizedRelay = legacyRelay.trim()
-        if (normalizedRelay.isBlank()) {
-            return emptyList()
-        }
-
-        return listOf(
-            VpnRelayTarget(
-                id = "relay-1",
-                addr = normalizedRelay,
-                shortId = 1,
-                ports = normalizedRelay.parseRelayPort()?.let(::listOf).orEmpty(),
-            ),
-        )
     }
 
     private fun parseMetrics(json: JSONObject?): VpnMetricsConfig {
@@ -309,13 +379,46 @@ class VpnConfigImportParser @Inject constructor() {
         )
     }
 
+    private fun parseNetworkRescue(json: JSONObject?): NetworkRescueProfile {
+        if (json == null) {
+            return NetworkRescueProfile.OFF
+        }
+        return normalizeNetworkRescue(
+            enabled = json.opt("enabled").toBoolean(default = false),
+            profile = json.optString("profile"),
+        )
+    }
+
+    private fun parseNetworkRescue(map: Map<*, *>?): NetworkRescueProfile {
+        if (map == null) {
+            return NetworkRescueProfile.OFF
+        }
+        return normalizeNetworkRescue(
+            enabled = map["enabled"].toBoolean(default = false),
+            profile = map["profile"]?.toString().orEmpty(),
+        )
+    }
+
+    private fun normalizeNetworkRescue(
+        enabled: Boolean,
+        profile: String,
+    ): NetworkRescueProfile {
+        return NetworkRescueProfile.fromWireValue(profile)
+            ?.takeIf { it != NetworkRescueProfile.OFF || !enabled }
+            ?: if (enabled) {
+                NetworkRescueProfile.STABLE
+            } else {
+                NetworkRescueProfile.OFF
+            }
+    }
+
     private fun parseTransportMode(rawMode: Any?): VpnTransportMode {
         val mode = rawMode?.toString().orEmpty().trim().lowercase()
         if (mode.isBlank()) {
             return VpnTransportMode.AUTO
         }
-        return VpnTransportMode.entries.firstOrNull { it.wireValue == mode }
-            ?: throw IllegalArgumentException("transport.mode must be auto, tcp, or utp.")
+        return VpnTransportMode.fromRuntimeId(mode)
+            ?: throw IllegalArgumentException("transport.mode must be auto, tcp, utp, ws, https, rest, udp, or raw-udp.")
     }
 
     private fun normalizeServerFailbackDelay(rawDelay: Any?): Int {
@@ -326,10 +429,25 @@ class VpnConfigImportParser @Inject constructor() {
         return if (delay == 0) 60 else delay
     }
 
-    private fun List<*>?.toJsonArray(): JSONArray {
-        val array = JSONArray()
-        this?.forEach { array.put(it) }
-        return array
+    private fun normalizeTunnelMtu(
+        rawMtu: Any?,
+        transportMode: VpnTransportMode,
+        disableIpv6: Boolean,
+    ): Int {
+        val mtu = rawMtu.toIntOrNull(default = transportMode.defaultMtu())
+        val minMtu = if (disableIpv6) 100 else 1280
+        require(mtu in minMtu..1500) {
+            "tunnel_mtu must be ${minMtu}..1500 for the current IPv6 mode."
+        }
+        return mtu
+    }
+
+    private fun normalizePacketFragmentPayloadBytes(rawValue: Any?): Int {
+        val value = rawValue.toIntOrNull(default = 0)
+        require(value == 0 || value in 64..65536) {
+            "packet_fragment_payload_bytes must be 0 or a value from 64 to 65536."
+        }
+        return value
     }
 
     private fun JSONArray?.parsePorts(): List<Int> {
@@ -341,30 +459,29 @@ class VpnConfigImportParser @Inject constructor() {
             for (index in 0 until length()) {
                 val port = opt(index).toIntOrNull(default = -1)
                 require(port in 1..65535) {
-                    "relays[].ports must contain valid port numbers."
+                    "discovery_relays[].transport_ports must contain valid port numbers."
                 }
                 add(port)
             }
         }.distinct()
     }
 
-    private fun String.parseRelayPort(): Int? {
-        val separatorIndex = lastIndexOf(':')
-        if (separatorIndex <= 0 || separatorIndex == lastIndex) {
-            return null
+    private fun JSONObject?.parseTransportPorts(): Map<String, List<Int>> {
+        if (this == null) {
+            return emptyMap()
         }
-        return substring(separatorIndex + 1).trim().toIntOrNull()?.takeIf { it in 1..65535 }
-    }
 
-    private fun Any?.toBoolean(default: Boolean): Boolean {
-        return when (this) {
-            is Boolean -> this
-            is String -> when (trim().lowercase()) {
-                "true" -> true
-                "false" -> false
-                else -> default
+        return buildMap {
+            keys().forEach { key ->
+                val protocolId = key.trim().lowercase()
+                if (protocolId.isBlank()) {
+                    return@forEach
+                }
+                val ports = optJSONArray(key).parsePorts()
+                if (ports.isNotEmpty()) {
+                    put(protocolId, ports)
+                }
             }
-            else -> default
         }
     }
 
@@ -376,11 +493,57 @@ class VpnConfigImportParser @Inject constructor() {
         }
     }
 
+    private fun Any?.toBoolean(default: Boolean): Boolean {
+        return when (this) {
+            is Boolean -> this
+            is Number -> toInt() != 0
+            is String -> when (trim().lowercase()) {
+                "true" -> true
+                "1" -> true
+                "yes" -> true
+                "false" -> false
+                "0" -> false
+                "no" -> false
+                else -> default
+            }
+            else -> default
+        }
+    }
+
+    private fun Map<*, *>.toJsonObject(): JSONObject {
+        val json = JSONObject()
+        forEach { (key, value) ->
+            val name = key?.toString() ?: return@forEach
+            json.put(name, value.toJsonValue())
+        }
+        return json
+    }
+
+    private fun Any?.toJsonValue(): Any {
+        return when (this) {
+            null -> JSONObject.NULL
+            is Map<*, *> -> toJsonObject()
+            is List<*> -> JSONArray().also { array ->
+                forEach { item -> array.put(item.toJsonValue()) }
+            }
+            is Boolean,
+            is Number,
+            is String,
+            -> this
+            else -> toString()
+        }
+    }
+
     private companion object {
         const val MAYDAY_IMPORT_PATH_PREFIX = "mayday://import/"
         const val MAYDAY_IMPORT_QUERY_PREFIX = "mayday://import?"
         const val BASE64_GROUP_SIZE = 4
-        val BASE64_FLAGS = intArrayOf(Base64.DEFAULT, Base64.URL_SAFE or Base64.NO_WRAP)
+        val BASE64_DECODERS = arrayOf(
+            Base64.getDecoder(),
+            Base64.getUrlDecoder(),
+            Base64.getMimeDecoder(),
+        )
+        val BASE64_PAYLOAD_PATTERN = Regex("^[A-Za-z0-9+/_=-]+$")
         val SERVER_KEY_PATTERN = Regex("^[0-9a-fA-F]{64}$")
     }
 }

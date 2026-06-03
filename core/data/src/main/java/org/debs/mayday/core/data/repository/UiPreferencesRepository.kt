@@ -16,4 +16,6 @@ interface UiPreferencesRepository {
     suspend fun setDensity(density: AppDensity)
 
     suspend fun setOnboardingCompleted(completed: Boolean)
+
+    suspend fun setRiskWarningHidden(packageName: String, hidden: Boolean)
 }

@@ -4,5 +4,6 @@ data class VpnRelayTarget(
     val id: String,
     val addr: String,
     val shortId: Int,
-    val ports: List<Int> = emptyList(),
+    val relayKey: String = "",
+    val transportPorts: Map<String, List<Int>> = emptyMap(),
 )

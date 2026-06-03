@@ -10,10 +10,18 @@ data class VpnProfile(
     val mtu: Int = VpnTransportMode.AUTO.defaultMtu(),
     val serverFailbackDelaySec: Int = 60,
     val transportMode: VpnTransportMode = VpnTransportMode.AUTO,
+    val prestartFullProbe: Boolean = false,
+    val steadyStateQuickProbeEnabled: Boolean = false,
+    val steadyStateBenchmarkEnabled: Boolean = false,
+    val networkRescueProfile: NetworkRescueProfile = NetworkRescueProfile.OFF,
+    val disableIpv6: Boolean = false,
+    val packetFragmentPayloadBytes: Int = 0,
+    val disablePacketBatching: Boolean = false,
     val metrics: VpnMetricsConfig = VpnMetricsConfig(),
     val splitTunnelMode: SplitTunnelMode = SplitTunnelMode.DISABLED,
     val selectedPackages: Set<String> = emptySet(),
     val isAutoReconnectEnabled: Boolean = true,
+    val preservedConfigJson: String = "",
 ) {
     fun endpointSummary(): String {
         if (relays.isEmpty()) {

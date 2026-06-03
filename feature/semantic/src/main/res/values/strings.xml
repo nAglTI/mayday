@@ -1,0 +1,12 @@
+<resources>
+    <string name="semantic_scan_channel_name">mayday semantic scan</string>
+    <string name="semantic_scan_channel_description">Foreground progress for app semantic analysis.</string>
+    <string name="semantic_scan_notification_title">Tracking apps scan</string>
+    <string name="semantic_scan_notification_waiting">waiting for worker</string>
+    <string name="semantic_scan_notification_scanning">Scanning %1$d/%2$d: %3$s</string>
+    <string name="semantic_scan_notification_paused">Paused %1$d/%2$d</string>
+    <string name="semantic_scan_notification_done">Scan finished: %1$d/%2$d</string>
+    <string name="semantic_scan_action_pause">Pause</string>
+    <string name="semantic_scan_action_resume">Resume</string>
+    <string name="semantic_scan_action_cancel">Cancel</string>
+</resources>

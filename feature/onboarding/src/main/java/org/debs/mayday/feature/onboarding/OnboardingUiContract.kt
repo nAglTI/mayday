@@ -1,9 +1,7 @@
 package org.debs.mayday.feature.onboarding
 
 sealed interface OnboardingUiEvent {
-    data object ImportClicked : OnboardingUiEvent
     data object ImportClipboardClicked : OnboardingUiEvent
-    data object ManualSetupClicked : OnboardingUiEvent
     data object ContinueClicked : OnboardingUiEvent
     data object MessageShown : OnboardingUiEvent
     data class ConfigSelected(
@@ -16,8 +14,6 @@ sealed interface OnboardingUiEvent {
 }
 
 sealed interface OnboardingUiEffect {
-    data object OpenConfigPicker : OnboardingUiEffect
     data object ImportFromClipboard : OnboardingUiEffect
     data object NavigateHome : OnboardingUiEffect
-    data object NavigateToSettings : OnboardingUiEffect
 }

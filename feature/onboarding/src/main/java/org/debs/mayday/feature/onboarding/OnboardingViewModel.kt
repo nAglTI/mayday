@@ -55,11 +55,7 @@ class OnboardingViewModel @Inject constructor(
 
     fun onEvent(event: OnboardingUiEvent) {
         when (event) {
-            OnboardingUiEvent.ImportClicked -> emitEffect(OnboardingUiEffect.OpenConfigPicker)
             OnboardingUiEvent.ImportClipboardClicked -> emitEffect(OnboardingUiEffect.ImportFromClipboard)
-            OnboardingUiEvent.ManualSetupClicked -> completeOnboardingAndNavigate(
-                OnboardingUiEffect.NavigateToSettings,
-            )
             OnboardingUiEvent.ContinueClicked -> completeOnboardingAndNavigate(
                 OnboardingUiEffect.NavigateHome,
             )
@@ -98,7 +94,7 @@ class OnboardingViewModel @Inject constructor(
                 mutableState.update {
                     it.copy(
                         isLoading = false,
-                        message = error.message ?: strings().failedImportSelectedFile,
+                        message = error.message ?: strings().failedImportConfig,
                     )
                 }
             }

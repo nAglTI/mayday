@@ -12,6 +12,10 @@ import javax.inject.Singleton
 class AarBackedVpnCoreBridge @Inject constructor() : VpnCoreBridge {
     @Volatile
     private var runner: Runner? = null
+    @Volatile
+    private var runnerConfigJson: String? = null
+    @Volatile
+    private var vpnAttached: Boolean = false
     private val linkError: Throwable?
 
     override val isLinked: Boolean
@@ -40,6 +44,11 @@ class AarBackedVpnCoreBridge @Inject constructor() : VpnCoreBridge {
                         return request.socketProtector.protect(fd.toInt())
                     }
                 }
+                val nativeStatusHandler = object : vpncore.StatusHandler {
+                    override fun onStatus(statusJSON: String) {
+                        request.statusHandler.onStatus(statusJSON)
+                    }
+                }
                 val nativeReconfigurator = object : vpncore.TunReconfigurator {
                     override fun reconfigure(assignedIP: String, maskBits: Long) {
                         request.tunReconfigurator.reconfigure(assignedIP, maskBits)
@@ -57,18 +66,79 @@ class AarBackedVpnCoreBridge @Inject constructor() : VpnCoreBridge {
                     }
                 }
 
-                runner = Vpncore.runClient(
-                    request.tunFileDescriptor.toLong(),
-                    request.configJson,
-                    nativeProtector,
-                    nativeReconfigurator,
-                    nativeResolver,
+                val activeRunner = ensureRunner(
+                    configJson = request.configJson,
+                    protector = nativeProtector,
+                    statusHandler = nativeStatusHandler,
                 )
-                checkNotNull(runner) { "Vpncore.runClient returned null runner." }
+                if (vpnAttached) {
+                    activeRunner.restartVPN(
+                        request.tunFileDescriptor.toLong(),
+                        nativeReconfigurator,
+                        nativeResolver,
+                    )
+                } else {
+                    activeRunner.startVPN(
+                        request.tunFileDescriptor.toLong(),
+                        nativeReconfigurator,
+                        nativeResolver,
+                    )
+                }
+                vpnAttached = true
                 Unit
             }.onFailure {
                 Log.e(TAG, "Start request failed.")
             }
+        }
+    }
+
+    private fun ensureRunner(
+        configJson: String,
+        protector: vpncore.SocketProtector,
+        statusHandler: vpncore.StatusHandler,
+    ): Runner {
+        val existingRunner = runner
+        if (existingRunner != null && runnerConfigJson == configJson) {
+            return existingRunner
+        }
+
+        if (existingRunner != null) {
+            runCatching {
+                existingRunner.shutdown()
+            }.onFailure {
+                Log.e(TAG, "Runner replacement shutdown failed.")
+            }
+            runner = null
+            runnerConfigJson = null
+            vpnAttached = false
+        }
+
+        val newRunner = Vpncore.startRunner(configJson, protector, statusHandler)
+        runner = checkNotNull(newRunner) { "Vpncore.startRunner returned null runner." }
+        runnerConfigJson = configJson
+        vpnAttached = false
+        return runner as Runner
+    }
+
+    override fun supportedTransportsJson(): Result<String> {
+        return runCatching {
+            check(isLinked) {
+                linkErrorMessage ?: "vpncore.aar is present but could not be initialized."
+            }
+            Vpncore.supportedTransportsJSON()
+        }.onFailure {
+            Log.e(TAG, "Transport catalog request failed.")
+        }
+    }
+
+    override fun statusJson(): Result<String> {
+        return runCatching {
+            val activeRunner = checkNotNull(runner) {
+                "vpncore runner is not active, cannot read status."
+            }
+            activeRunner.statusJSON()
+        }.onFailure {
+            Log.e(TAG, "Status request failed.")
         }
     }
 
@@ -106,9 +176,21 @@ class AarBackedVpnCoreBridge @Inject constructor() : VpnCoreBridge {
 
     override fun stop() {
         val activeRunner = runner ?: return
-        runner = null
         runCatching {
             activeRunner.stop()
+            vpnAttached = false
+        }.onFailure {
+            Log.e(TAG, "Stop request failed.")
+        }
+    }
+
+    override fun shutdown() {
+        val activeRunner = runner ?: return
+        runner = null
+        runnerConfigJson = null
+        vpnAttached = false
+        runCatching {
+            activeRunner.shutdown()
         }.onFailure {
             Log.e(TAG, "Shutdown request failed.")
         }

@@ -1,6 +1,7 @@
 package org.debs.mayday.feature.home
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
@@ -61,6 +62,7 @@ class HomeFragment : Fragment() {
                                 HomeUiEffect.NavigateToSettings -> {
                                     findNavController().navigate("mayday://settings".toUri())
                                 }
+                                is HomeUiEffect.OpenUrl -> openUrl(effect.url)
                             }
                         }
                     }
@@ -93,6 +95,12 @@ class HomeFragment : Fragment() {
             viewModel.onEvent(HomeUiEvent.StartConfirmed)
         } else {
             vpnPermissionLauncher.launch(prepareIntent)
+        }
+    }
+
+    private fun openUrl(url: String) {
+        runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW, url.toUri()))
         }
     }
 }

@@ -1,5 +1,6 @@
 *.iml
 .gradle
+.claude
 /local.properties
 /.idea
 .DS_Store
@@ -14,5 +15,9 @@ local.properties
 **/RULES.md
 **/build/
 **/release/
+**/internalDocs
 /.kekes
 /.kotlin
+/analize
+/scripts
+AGENTS.md

@@ -1,13 +1,17 @@
 package org.debs.mayday.feature.split
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
@@ -17,6 +21,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -24,8 +29,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import org.debs.mayday.core.designsystem.component.MaydayBottomActionBar
 import org.debs.mayday.core.designsystem.component.MaydayScreenBackground
@@ -36,9 +44,17 @@ import org.debs.mayday.core.designsystem.component.MaydayTextField
 import org.debs.mayday.core.designsystem.component.MaydayToggle
 import org.debs.mayday.core.designsystem.component.MaydayTopBar
 import org.debs.mayday.core.designsystem.theme.LocalMaydayDensity
+import org.debs.mayday.core.designsystem.theme.MaydayTheme
+import org.debs.mayday.core.designsystem.theme.MaydayStrings
 import org.debs.mayday.core.designsystem.theme.maydayStrings
+import org.debs.mayday.core.designsystem.theme.saveAppSelection
+import org.debs.mayday.core.model.AppLanguage
+import org.debs.mayday.core.model.AppRiskLevel
+import org.debs.mayday.core.model.AppSemanticAnalysisResult
+import org.debs.mayday.core.model.AppThemeMode
 import org.debs.mayday.core.model.InstalledApp
 import org.debs.mayday.core.model.SplitTunnelMode
+import org.debs.mayday.core.model.UiPreferences
 
 @Composable
 internal fun SplitScreen(
@@ -60,16 +76,14 @@ internal fun SplitScreen(
             containerColor = Color.Transparent,
             snackbarHost = { SnackbarHost(snackbarHostState) },
             bottomBar = {
-                MaydayBottomActionBar(
-                    primaryText = if (state.isLoading) strings.loading else strings.splitRouting,
-                    onPrimaryClick = { onEvent(SplitUiEvent.SaveClicked) },
-                    enabled = !state.isLoading,
-                    supportingText = if (state.isLoading) {
-                        strings.readSavedRoutingState
-                    } else {
-                        "${state.selectedPackages.size} ${strings.apps}"
-                    },
-                )
+                if (state.hasUnsavedChanges) {
+                    MaydayBottomActionBar(
+                        primaryText = if (state.isLoading) strings.saving else strings.saveAppSelection,
+                        onPrimaryClick = { onEvent(SplitUiEvent.SaveClicked) },
+                        enabled = !state.isLoading,
+                        supportingText = "${state.selectedPackages.size} ${strings.apps}",
+                    )
+                }
             },
         ) { innerPadding ->
             LazyColumn(
@@ -123,94 +137,13 @@ internal fun SplitScreen(
                     }
                 } else {
                     item {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            MaydaySectionTitle(text = strings.routingSummary)
-                            MaydaySurfaceCard {
-                                MaydaySegmentedControl(
-                                    items = listOf(
-                                        SplitTunnelMode.DISABLED to strings.allTraffic,
-                                        SplitTunnelMode.ONLY_SELECTED to strings.onlySelected,
-                                        SplitTunnelMode.EXCLUDE_SELECTED to strings.exceptSelected,
-                                    ),
-                                    selected = state.splitTunnelMode,
-                                    onSelect = { onEvent(SplitUiEvent.ModeChanged(it as SplitTunnelMode)) },
-                                    equalWidth = true,
-                                )
-                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Column(
-                                        modifier = Modifier.weight(1f),
-                                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                                    ) {
-                                        Text(
-                                            text = strings.showSystemApps,
-                                            style = MaterialTheme.typography.titleLarge,
-                                            color = MaterialTheme.colorScheme.onSurface,
-                                        )
-                                        Text(
-                                            text = strings.showSystemAppsHint,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                    MaydayToggle(
-                                        checked = state.showSystemApps,
-                                        onCheckedChange = { onEvent(SplitUiEvent.ShowSystemAppsChanged(it)) },
-                                    )
-                                }
-                                MaydayTextField(
-                                    label = strings.search,
-                                    value = state.appSearchQuery,
-                                    onValueChange = { onEvent(SplitUiEvent.SearchQueryChanged(it)) },
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
-                                )
-                            }
-                        }
+                        SplitRoutingControls(
+                            state = state,
+                            onEvent = onEvent,
+                        )
                     }
 
-                    if (state.splitTunnelMode != SplitTunnelMode.DISABLED) {
-                        if (state.installedApps.isEmpty()) {
-                            item {
-                                MaydaySurfaceCard {
-                                    Text(
-                                        text = strings.noAppsFound,
-                                        style = MaterialTheme.typography.titleLarge,
-                                        fontWeight = FontWeight.Medium,
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                    )
-                                    Text(
-                                        text = strings.noAppsFoundHint,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                            }
-                        } else {
-                            items(
-                                items = state.installedApps,
-                                key = { app -> app.packageName },
-                            ) { app ->
-                                MaydaySurfaceCard {
-                                    SplitAppRow(
-                                        app = app,
-                                        isSelected = state.selectedPackages.contains(app.packageName),
-                                        onCheckedChange = { checked ->
-                                            onEvent(
-                                                SplitUiEvent.PackageSelectionChanged(
-                                                    packageName = app.packageName,
-                                                    selected = checked,
-                                                ),
-                                            )
-                                        },
-                                    )
-                                }
-                            }
-                        }
-                    } else {
+                    if (state.splitTunnelMode == SplitTunnelMode.DISABLED) {
                         item {
                             MaydaySurfaceCard {
                                 Text(
@@ -227,6 +160,46 @@ internal fun SplitScreen(
                             }
                         }
                     }
+
+                    if (state.installedApps.isEmpty()) {
+                        item {
+                            MaydaySurfaceCard {
+                                Text(
+                                    text = strings.noAppsFound,
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                                Text(
+                                    text = strings.noAppsFoundHint,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    } else {
+                        items(
+                            items = state.installedApps,
+                            key = { item -> item.app.packageName },
+                        ) { item ->
+                            MaydaySurfaceCard {
+                                SplitAppRow(
+                                    item = item,
+                                    isSelected = state.selectedPackages.contains(item.app.packageName),
+                                    selectionEnabled = state.splitTunnelMode != SplitTunnelMode.DISABLED,
+                                    strings = strings,
+                                    onCheckedChange = { checked ->
+                                        onEvent(
+                                            SplitUiEvent.PackageSelectionChanged(
+                                                packageName = item.app.packageName,
+                                                selected = checked,
+                                            ),
+                                        )
+                                    },
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -234,11 +207,76 @@ internal fun SplitScreen(
 }
 
 @Composable
+private fun SplitRoutingControls(
+    state: SplitUiState,
+    onEvent: (SplitUiEvent) -> Unit,
+) {
+    val strings = maydayStrings(state.uiPreferences.language)
+    MaydaySectionTitle(text = strings.routingSummary)
+    MaydaySurfaceCard {
+        MaydaySegmentedControl(
+            items = listOf(
+                SplitTunnelMode.DISABLED to strings.allTraffic,
+                SplitTunnelMode.ONLY_SELECTED to strings.onlySelected,
+                SplitTunnelMode.EXCLUDE_SELECTED to strings.exceptSelected,
+            ),
+            selected = state.splitTunnelMode,
+            onSelect = { onEvent(SplitUiEvent.ModeChanged(it)) },
+            equalWidth = true,
+        )
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    text = strings.showSystemApps,
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    text = strings.showSystemAppsHint,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            MaydayToggle(
+                checked = state.showSystemApps,
+                onCheckedChange = { onEvent(SplitUiEvent.ShowSystemAppsChanged(it)) },
+            )
+        }
+        MaydayTextField(
+            label = strings.search,
+            value = state.appSearchQuery,
+            onValueChange = { onEvent(SplitUiEvent.SearchQueryChanged(it)) },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+        )
+        MaydaySegmentedControl(
+            items = listOf(
+                SplitAppSortMode.ROUTING to splitSortLabel(SplitAppSortMode.ROUTING, strings),
+                SplitAppSortMode.RISK_SCORE to splitSortLabel(SplitAppSortMode.RISK_SCORE, strings),
+            ),
+            selected = state.appSortMode,
+            onSelect = { onEvent(SplitUiEvent.SortModeChanged(it)) },
+            equalWidth = true,
+        )
+    }
+}
+
+@Composable
 private fun SplitAppRow(
-    app: InstalledApp,
+    item: SplitAppItem,
     isSelected: Boolean,
+    selectionEnabled: Boolean,
+    strings: MaydayStrings,
     onCheckedChange: (Boolean) -> Unit,
 ) {
+    val app = item.app
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -253,16 +291,259 @@ private fun SplitAppRow(
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             Text(
                 text = app.packageName,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            app.versionName?.takeIf(String::isNotBlank)?.let { version ->
+                Text(
+                    text = version,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            SplitSemanticBadge(
+                analysis = item.semanticAnalysis,
+                strings = strings,
             )
         }
-        MaydayToggle(
-            checked = isSelected,
-            onCheckedChange = onCheckedChange,
+        Spacer(modifier = Modifier.width(12.dp))
+        if (selectionEnabled) {
+            MaydayToggle(
+                checked = isSelected,
+                onCheckedChange = onCheckedChange,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SplitSemanticBadge(
+    analysis: AppSemanticAnalysisResult,
+    strings: MaydayStrings,
+) {
+    val isScanned = analysis.scannedAtEpochMillis != 0L
+    val color = if (isScanned) {
+        splitSemanticRiskColor(analysis.riskLevel)
+    } else {
+        splitSemanticUnscannedColor()
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.small,
+        color = color.copy(alpha = 0.14f),
+        contentColor = color,
+        border = BorderStroke(1.dp, color.copy(alpha = 0.55f)),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = splitSemanticTitle(strings),
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = splitSemanticBadgeText(analysis, strings),
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = color,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun splitSemanticRiskColor(level: AppRiskLevel): Color {
+    return when (level) {
+        AppRiskLevel.CRITICAL -> MaterialTheme.colorScheme.error
+        AppRiskLevel.HIGH -> if (MaterialTheme.colorScheme.background.luminance() < 0.5f) {
+            Color(0xFFE58E5D)
+        } else {
+            Color(0xFFC75A2A)
+        }
+        AppRiskLevel.MEDIUM -> if (MaterialTheme.colorScheme.background.luminance() < 0.5f) {
+            Color(0xFFE0B84A)
+        } else {
+            Color(0xFFB68100)
+        }
+        AppRiskLevel.LOW -> MaterialTheme.colorScheme.onSurfaceVariant
+        AppRiskLevel.CLEAN -> MaterialTheme.colorScheme.primary
+    }
+}
+
+@Composable
+private fun splitSemanticUnscannedColor(): Color {
+    return if (MaterialTheme.colorScheme.background.luminance() < 0.5f) {
+        Color(0xFF64B5F6)
+    } else {
+        Color(0xFF1565C0)
+    }
+}
+
+private fun splitSortLabel(
+    sortMode: SplitAppSortMode,
+    strings: MaydayStrings,
+): String {
+    return when (strings.locale) {
+        AppLanguage.RU -> when (sortMode) {
+            SplitAppSortMode.ROUTING -> "маршрут"
+            SplitAppSortMode.RISK_SCORE -> "по риску"
+        }
+        AppLanguage.EN -> when (sortMode) {
+            SplitAppSortMode.ROUTING -> "route"
+            SplitAppSortMode.RISK_SCORE -> "risk"
+        }
+    }
+}
+
+private fun splitSemanticTitle(strings: MaydayStrings): String {
+    return when (strings.locale) {
+        AppLanguage.RU -> "VPN-риск"
+        AppLanguage.EN -> "semantic"
+    }
+}
+
+private fun splitSemanticBadgeText(
+    analysis: AppSemanticAnalysisResult,
+    strings: MaydayStrings,
+): String {
+    return if (analysis.scannedAtEpochMillis == 0L) {
+        when (strings.locale) {
+            AppLanguage.RU -> "нет результата"
+            AppLanguage.EN -> "no result"
+        }
+    } else {
+        val proofLabel = when (strings.locale) {
+            AppLanguage.RU -> "доказ."
+            AppLanguage.EN -> "proof"
+        }
+        "${splitRiskLevelLabel(analysis.riskLevel, strings)} · ${analysis.score} · $proofLabel ${analysis.proofConfidence}"
+    }
+}
+
+private fun splitRiskLevelLabel(
+    level: AppRiskLevel,
+    strings: MaydayStrings,
+): String {
+    return when (strings.locale) {
+        AppLanguage.RU -> when (level) {
+            AppRiskLevel.CRITICAL -> "критичный"
+            AppRiskLevel.HIGH -> "высокий"
+            AppRiskLevel.MEDIUM -> "средний"
+            AppRiskLevel.LOW -> "низкий"
+            AppRiskLevel.CLEAN -> "чисто"
+        }
+        AppLanguage.EN -> when (level) {
+            AppRiskLevel.CRITICAL -> "critical"
+            AppRiskLevel.HIGH -> "high"
+            AppRiskLevel.MEDIUM -> "medium"
+            AppRiskLevel.LOW -> "low"
+            AppRiskLevel.CLEAN -> "clean"
+        }
+    }
+}
+
+@Preview(name = "Split / Loading", showBackground = true, widthDp = 390, heightDp = 844)
+@Composable
+private fun SplitLoadingPreview() {
+    SplitScreenPreview(
+        state = SplitUiState(
+            uiPreferences = previewSplitPreferences(),
+            isLoading = true,
+        ),
+    )
+}
+
+@Preview(name = "Split / Selected Apps", showBackground = true, widthDp = 390, heightDp = 844)
+@Composable
+private fun SplitSelectedAppsPreview() {
+    SplitScreenPreview(
+        state = SplitUiState(
+            uiPreferences = previewSplitPreferences(),
+            splitTunnelMode = SplitTunnelMode.ONLY_SELECTED,
+            installedApps = previewSplitApps(),
+            selectedPackages = setOf("org.telegram.messenger", "com.browser.mobile"),
+            appSortMode = SplitAppSortMode.RISK_SCORE,
+            isLoading = false,
+        ),
+    )
+}
+
+@Composable
+private fun SplitScreenPreview(state: SplitUiState) {
+    MaydayTheme(
+        themeMode = state.uiPreferences.themeMode,
+        language = state.uiPreferences.language,
+        density = state.uiPreferences.density,
+    ) {
+        SplitScreen(
+            state = state,
+            onEvent = {},
         )
     }
+}
+
+private fun previewSplitApps(): List<SplitAppItem> {
+    return listOf(
+        SplitAppItem(
+            app = InstalledApp(
+                packageName = "org.telegram.messenger",
+                label = "Telegram",
+                isSystem = false,
+                versionName = "10.15",
+            ),
+            semanticAnalysis = AppSemanticAnalysisResult(
+                score = 8,
+                riskLevel = AppRiskLevel.LOW,
+                scannedAtEpochMillis = 1_714_000_000_000L,
+                cleanScore = 80,
+            ),
+        ),
+        SplitAppItem(
+            app = InstalledApp(
+                packageName = "com.bank.app",
+                label = "Bank App",
+                isSystem = false,
+                versionName = "4.8.1",
+            ),
+            semanticAnalysis = AppSemanticAnalysisResult(
+                score = 62,
+                riskLevel = AppRiskLevel.HIGH,
+                scannedAtEpochMillis = 1_714_000_200_000L,
+            ),
+        ),
+        SplitAppItem(
+            app = InstalledApp(
+                packageName = "com.browser.mobile",
+                label = "Browser",
+                isSystem = false,
+                versionName = "126.0",
+            ),
+        ),
+    )
+}
+
+private fun previewSplitPreferences(): UiPreferences {
+    return UiPreferences(
+        themeMode = AppThemeMode.DARK,
+        language = AppLanguage.EN,
+        onboardingCompleted = true,
+    )
 }

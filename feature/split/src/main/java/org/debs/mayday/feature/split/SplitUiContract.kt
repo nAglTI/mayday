@@ -10,6 +10,7 @@ sealed interface SplitUiEvent {
     data class ModeChanged(val value: SplitTunnelMode) : SplitUiEvent
     data class ShowSystemAppsChanged(val value: Boolean) : SplitUiEvent
     data class SearchQueryChanged(val value: String) : SplitUiEvent
+    data class SortModeChanged(val value: SplitAppSortMode) : SplitUiEvent
     data class PackageSelectionChanged(
         val packageName: String,
         val selected: Boolean,

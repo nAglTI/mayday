@@ -1,0 +1,12 @@
+<resources>
+    <string name="semantic_scan_channel_name">Семантический сканер mayday</string>
+    <string name="semantic_scan_channel_description">Фоновый прогресс семантического анализа приложений.</string>
+    <string name="semantic_scan_notification_title">Проверка приложений</string>
+    <string name="semantic_scan_notification_waiting">ожидание воркера</string>
+    <string name="semantic_scan_notification_scanning">Проверка %1$d/%2$d: %3$s</string>
+    <string name="semantic_scan_notification_paused">Пауза %1$d/%2$d</string>
+    <string name="semantic_scan_notification_done">Проверка завершена: %1$d/%2$d</string>
+    <string name="semantic_scan_action_pause">Пауза</string>
+    <string name="semantic_scan_action_resume">Продолжить</string>
+    <string name="semantic_scan_action_cancel">Отмена</string>
+</resources>

@@ -1,6 +1,11 @@
 package org.debs.mayday.core.designsystem.theme
 
 import org.debs.mayday.core.model.AppLanguage
+import org.debs.mayday.core.model.AppRiskFindingType
+import org.debs.mayday.core.model.AppRiskLevel
+import org.debs.mayday.core.model.AppRiskScanResult
+import org.debs.mayday.core.model.AppRiskSignalStrength
+import org.debs.mayday.core.model.VpnConnectionStatus
 
 data class MaydayStrings(
     val locale: AppLanguage,
@@ -25,8 +30,6 @@ data class MaydayStrings(
     val advanced: String,
     val diagnostics: String,
     val importConfig: String,
-    val importFile: String,
-    val manual: String,
     val continueLabel: String,
     val onboardingTitle: String,
     val onboardingSubtitle: String,
@@ -83,14 +86,9 @@ data class MaydayStrings(
     val noAppsFound: String,
     val noAppsFoundHint: String,
     val noPerAppSelectionHint: String,
-    val onboardingImportHint: String,
-    val onboardingManualHint: String,
     val onboardingContinueHint: String,
     val readSavedRoutingState: String,
     val readSplitRoutingState: String,
-    val failedReadSelectedFile: String,
-    val unableToOpenSelectedConfigFile: String,
-    val failedImportSelectedFile: String,
     val failedImportConfig: String,
     val atLeastOneRelayRequired: String,
     val atLeastOneServerRequired: String,
@@ -131,11 +129,9 @@ fun maydayStrings(language: AppLanguage): MaydayStrings {
             advanced = "расширенные",
             diagnostics = "диагностика",
             importConfig = "импорт конфига",
-            importFile = "файл",
-            manual = "вручную",
             continueLabel = "пропустить",
             onboardingTitle = "подключение",
-            onboardingSubtitle = "импортируйте конфигурацию или откройте профиль для ручной настройки",
+            onboardingSubtitle = "импортируйте ключ, вставьте его из буфера обмена или пропустите этот шаг",
             allTraffic = "весь трафик",
             onlySelected = "только выбранные",
             exceptSelected = "все кроме выбранных",
@@ -189,14 +185,9 @@ fun maydayStrings(language: AppLanguage): MaydayStrings {
             noAppsFound = "Приложения не найдены",
             noAppsFoundHint = "Измените поисковый запрос или включите системные приложения, чтобы увидеть больше пакетов.",
             noPerAppSelectionHint = "В этом режиме отдельный выбор приложений не требуется.",
-            onboardingImportHint = "client.yaml / client.json",
-            onboardingManualHint = "relays, servers[]",
             onboardingContinueHint = "открыть главный экран без импорта",
             readSavedRoutingState = "Читаем сохранённый режим и список приложений...",
             readSplitRoutingState = "Читаем режим split routing и список приложений из хранилища.",
-            failedReadSelectedFile = "Не удалось прочитать выбранный файл.",
-            unableToOpenSelectedConfigFile = "Не удалось открыть выбранный конфиг.",
-            failedImportSelectedFile = "Не удалось импортировать выбранный файл.",
             failedImportConfig = "Не удалось импортировать конфиг.",
             atLeastOneRelayRequired = "Нужно указать хотя бы один ретранслятор.",
             atLeastOneServerRequired = "Нужно указать хотя бы один сервер.",
@@ -234,11 +225,9 @@ fun maydayStrings(language: AppLanguage): MaydayStrings {
             advanced = "advanced",
             diagnostics = "diagnostics",
             importConfig = "import config",
-            importFile = "file",
-            manual = "manual",
             continueLabel = "skip",
             onboardingTitle = "get connected",
-            onboardingSubtitle = "import a config file or open the profile editor for manual setup",
+            onboardingSubtitle = "import a key, paste it from clipboard, or skip this step",
             allTraffic = "all traffic",
             onlySelected = "only selected",
             exceptSelected = "all except selected",
@@ -292,14 +281,9 @@ fun maydayStrings(language: AppLanguage): MaydayStrings {
             noAppsFound = "No apps found",
             noAppsFoundHint = "Change the search query or include system apps to see more packages.",
             noPerAppSelectionHint = "No per-app selection is needed in this mode.",
-            onboardingImportHint = "client.yaml / client.json",
-            onboardingManualHint = "relays, servers[]",
             onboardingContinueHint = "open the dashboard without importing now",
             readSavedRoutingState = "Reading saved routing state...",
             readSplitRoutingState = "Reading split routing mode and installed apps from storage.",
-            failedReadSelectedFile = "Failed to read the selected file.",
-            unableToOpenSelectedConfigFile = "Unable to open the selected config file.",
-            failedImportSelectedFile = "Failed to import the selected file.",
             failedImportConfig = "Failed to import config.",
             atLeastOneRelayRequired = "At least one relay is required.",
             atLeastOneServerRequired = "At least one server is required.",
@@ -361,17 +345,168 @@ val MaydayStrings.importClipboard: String
         AppLanguage.EN -> "from clipboard"
     }
 
-val MaydayStrings.importText: String
+val MaydayStrings.importKey: String
     get() = when (locale) {
-        AppLanguage.RU -> "из текста"
-        AppLanguage.EN -> "from text"
+        AppLanguage.RU -> "по ключу"
+        AppLanguage.EN -> "from key"
     }
 
-val MaydayStrings.configText: String
+val MaydayStrings.importKeyText: String
     get() = when (locale) {
-        AppLanguage.RU -> "текст конфига"
-        AppLanguage.EN -> "config text"
+        AppLanguage.RU -> "ключ импорта"
+        AppLanguage.EN -> "import key"
     }
+
+fun MaydayStrings.updateAvailableTitle(version: String): String {
+    return when (locale) {
+        AppLanguage.RU -> "Доступна версия $version"
+        AppLanguage.EN -> "Version $version is available"
+    }
+}
+
+val MaydayStrings.updateAvailableBody: String
+    get() = when (locale) {
+        AppLanguage.RU -> "Вышла новая версия приложения. Можно обновиться с GitHub."
+        AppLanguage.EN -> "A new app version is out. You can update from GitHub."
+    }
+
+val MaydayStrings.updateNow: String
+    get() = when (locale) {
+        AppLanguage.RU -> "обновиться"
+        AppLanguage.EN -> "update"
+    }
+
+val MaydayStrings.dismiss: String
+    get() = when (locale) {
+        AppLanguage.RU -> "скрыть"
+        AppLanguage.EN -> "dismiss"
+    }
+
+val MaydayStrings.saveAppSelection: String
+    get() = when (locale) {
+        AppLanguage.RU -> "сохранить выбор приложений"
+        AppLanguage.EN -> "save app selection"
+    }
+
+val MaydayStrings.configNeedsNewKeyTitle: String
+    get() = when (locale) {
+        AppLanguage.RU -> "нужен новый ключ"
+        AppLanguage.EN -> "new key required"
+    }
+
+val MaydayStrings.configNeedsNewKeyBody: String
+    get() = when (locale) {
+        AppLanguage.RU -> "Сохранённый конфиг не подходит для текущей версии ядра VPN. Получите новый ключ и импортируйте его."
+        AppLanguage.EN -> "The saved config is not compatible with the current VPN core. Get a new key and import it."
+    }
+
+val MaydayStrings.advancedDiagnostics: String
+    get() = when (locale) {
+        AppLanguage.RU -> "расширенная диагностика"
+        AppLanguage.EN -> "advanced diagnostics"
+    }
+
+val MaydayStrings.showAdvanced: String
+    get() = when (locale) {
+        AppLanguage.RU -> "показать"
+        AppLanguage.EN -> "show"
+    }
+
+val MaydayStrings.hideAdvanced: String
+    get() = when (locale) {
+        AppLanguage.RU -> "скрыть"
+        AppLanguage.EN -> "hide"
+    }
+
+val MaydayStrings.coreStateLabel: String
+    get() = when (locale) {
+        AppLanguage.RU -> "состояние ядра"
+        AppLanguage.EN -> "core state"
+    }
+
+val MaydayStrings.vpnStateLabel: String
+    get() = when (locale) {
+        AppLanguage.RU -> "состояние туннеля"
+        AppLanguage.EN -> "VPN tunnel"
+    }
+
+val MaydayStrings.exitServerLabel: String
+    get() = when (locale) {
+        AppLanguage.RU -> "выходной сервер"
+        AppLanguage.EN -> "exit server"
+    }
+
+val MaydayStrings.uploadLabel: String
+    get() = when (locale) {
+        AppLanguage.RU -> "исходящая скорость"
+        AppLanguage.EN -> "upload"
+    }
+
+val MaydayStrings.downloadLabel: String
+    get() = when (locale) {
+        AppLanguage.RU -> "входящая скорость"
+        AppLanguage.EN -> "download"
+    }
+
+val MaydayStrings.totalRateLabel: String
+    get() = when (locale) {
+        AppLanguage.RU -> "общая скорость"
+        AppLanguage.EN -> "total"
+    }
+
+val MaydayStrings.protocolsLabel: String
+    get() = when (locale) {
+        AppLanguage.RU -> "протоколы"
+        AppLanguage.EN -> "protocols"
+    }
+
+val MaydayStrings.endpointsLabel: String
+    get() = when (locale) {
+        AppLanguage.RU -> "точки подключения"
+        AppLanguage.EN -> "endpoints"
+    }
+
+fun MaydayStrings.vpnTunnelStatus(status: VpnConnectionStatus): String {
+    return when (locale) {
+        AppLanguage.RU -> when (status) {
+            VpnConnectionStatus.Idle -> "VPN отключен"
+            VpnConnectionStatus.Starting -> "VPN подключается"
+            VpnConnectionStatus.Running -> "VPN-туннель активен"
+            VpnConnectionStatus.CoreMissing -> "движок VPN недоступен"
+            VpnConnectionStatus.Stopping -> "VPN отключается"
+            VpnConnectionStatus.Error -> "ошибка подключения"
+        }
+        AppLanguage.EN -> when (status) {
+            VpnConnectionStatus.Idle -> "VPN disconnected"
+            VpnConnectionStatus.Starting -> "VPN connecting"
+            VpnConnectionStatus.Running -> "VPN tunnel active"
+            VpnConnectionStatus.CoreMissing -> "VPN engine missing"
+            VpnConnectionStatus.Stopping -> "VPN disconnecting"
+            VpnConnectionStatus.Error -> "connection error"
+        }
+    }
+}
+
+fun MaydayStrings.vpnTunnelHeadline(status: VpnConnectionStatus): String {
+    return when (locale) {
+        AppLanguage.RU -> when (status) {
+            VpnConnectionStatus.Idle -> "Готов к подключению"
+            VpnConnectionStatus.Starting -> "Проверяем узлы и готовим туннель"
+            VpnConnectionStatus.Running -> "VPN-туннель работает"
+            VpnConnectionStatus.CoreMissing -> "Движок VPN недоступен"
+            VpnConnectionStatus.Stopping -> "Отключаем туннель"
+            VpnConnectionStatus.Error -> "Не удалось подключиться"
+        }
+        AppLanguage.EN -> when (status) {
+            VpnConnectionStatus.Idle -> "Ready to connect"
+            VpnConnectionStatus.Starting -> "Checking relays and preparing the tunnel"
+            VpnConnectionStatus.Running -> "VPN tunnel is active"
+            VpnConnectionStatus.CoreMissing -> "VPN engine is unavailable"
+            VpnConnectionStatus.Stopping -> "Disconnecting the tunnel"
+            VpnConnectionStatus.Error -> "Unable to connect"
+        }
+    }
+}
 
 val MaydayStrings.clipboardEmpty: String
     get() = when (locale) {
@@ -387,15 +522,205 @@ val MaydayStrings.cancel: String
 
 val MaydayStrings.onboardingClipboardHint: String
     get() = when (locale) {
-        AppLanguage.RU -> "mayday://import/... из буфера"
-        AppLanguage.EN -> "mayday://import/... from clipboard"
+        AppLanguage.RU -> "ключ импорта из буфера обмена"
+        AppLanguage.EN -> "import key from clipboard"
     }
 
 val MaydayStrings.onboardingTextImportHint: String
     get() = when (locale) {
-        AppLanguage.RU -> "mayday://import/... или YAML / JSON"
-        AppLanguage.EN -> "mayday://import/... or YAML / JSON"
+        AppLanguage.RU -> "mayday://import/... или сам ключ"
+        AppLanguage.EN -> "mayday://import/... or the key"
     }
+
+val MaydayStrings.vpnRiskScan: String
+    get() = when (locale) {
+        AppLanguage.RU -> "проверка VPN-слежки"
+        AppLanguage.EN -> "VPN tracking check"
+    }
+
+val MaydayStrings.vpnRiskDetails: String
+    get() = when (locale) {
+        AppLanguage.RU -> "признаки риска"
+        AppLanguage.EN -> "risk signals"
+    }
+
+val MaydayStrings.noRiskSignals: String
+    get() = when (locale) {
+        AppLanguage.RU -> "признаков VPN-слежки не найдено"
+        AppLanguage.EN -> "no VPN tracking signals found"
+    }
+
+val MaydayStrings.knownAppGroup: String
+    get() = when (locale) {
+        AppLanguage.RU -> "группа"
+        AppLanguage.EN -> "group"
+    }
+
+val MaydayStrings.openAppSettings: String
+    get() = when (locale) {
+        AppLanguage.RU -> "открыть настройки"
+        AppLanguage.EN -> "open settings"
+    }
+
+val MaydayStrings.openAppPermissions: String
+    get() = when (locale) {
+        AppLanguage.RU -> "разрешения"
+        AppLanguage.EN -> "permissions"
+    }
+
+val MaydayStrings.suggestUninstall: String
+    get() = when (locale) {
+        AppLanguage.RU -> "предложить удалить"
+        AppLanguage.EN -> "suggest uninstall"
+    }
+
+val MaydayStrings.hideRiskWarning: String
+    get() = when (locale) {
+        AppLanguage.RU -> "скрыть предупреждение"
+        AppLanguage.EN -> "hide warning"
+    }
+
+val MaydayStrings.warningHidden: String
+    get() = when (locale) {
+        AppLanguage.RU -> "предупреждение скрыто"
+        AppLanguage.EN -> "warning hidden"
+    }
+
+val MaydayStrings.systemAppNotChecked: String
+    get() = when (locale) {
+        AppLanguage.RU -> "системное, не проверяется"
+        AppLanguage.EN -> "system app, not checked"
+    }
+
+val MaydayStrings.pendingRiskScan: String
+    get() = when (locale) {
+        AppLanguage.RU -> "ожидает проверки"
+        AppLanguage.EN -> "waiting for scan"
+    }
+
+val MaydayStrings.checkingRiskScan: String
+    get() = when (locale) {
+        AppLanguage.RU -> "проверяется..."
+        AppLanguage.EN -> "checking..."
+    }
+
+val MaydayStrings.riskScanComplete: String
+    get() = when (locale) {
+        AppLanguage.RU -> "проверка завершена"
+        AppLanguage.EN -> "scan complete"
+    }
+
+val MaydayStrings.restartRiskScan: String
+    get() = when (locale) {
+        AppLanguage.RU -> "перезапустить проверку"
+        AppLanguage.EN -> "restart scan"
+    }
+
+val MaydayStrings.blacklistedAppNotChecked: String
+    get() = when (locale) {
+        AppLanguage.RU -> "в blacklist, не проверяется"
+        AppLanguage.EN -> "blacklisted, not checked"
+    }
+
+fun MaydayStrings.appRiskLabel(result: AppRiskScanResult): String {
+    return when (locale) {
+        AppLanguage.RU -> when (result.riskLevel) {
+            AppRiskLevel.CRITICAL -> "критично"
+            AppRiskLevel.HIGH -> "высокий риск"
+            AppRiskLevel.MEDIUM -> "подозрительно"
+            AppRiskLevel.LOW -> "без предупреждения"
+            AppRiskLevel.CLEAN -> "без признаков"
+        }
+        AppLanguage.EN -> when (result.riskLevel) {
+            AppRiskLevel.CRITICAL -> "critical"
+            AppRiskLevel.HIGH -> "high risk"
+            AppRiskLevel.MEDIUM -> "suspicious"
+            AppRiskLevel.LOW -> "no warning"
+            AppRiskLevel.CLEAN -> "clean"
+        }
+    }
+}
+
+fun MaydayStrings.appRiskSummary(result: AppRiskScanResult): String {
+    return when (locale) {
+        AppLanguage.RU -> when (result.riskLevel) {
+            AppRiskLevel.CRITICAL -> "Найден прямой VPN-детект вместе с признаками отправки или блокировки VPN-статуса."
+            AppRiskLevel.HIGH -> "Найдена проверяемая связка прямого детекта VPN, Tor, proxy или VPN-приложений."
+            AppRiskLevel.MEDIUM -> "Есть ограниченные признаки риска без достаточной связки для высокого уровня."
+            AppRiskLevel.LOW -> "Есть только слабые диагностические признаки без предупреждения."
+            AppRiskLevel.CLEAN -> noRiskSignals
+        }
+        AppLanguage.EN -> when (result.riskLevel) {
+            AppRiskLevel.CRITICAL -> "Direct VPN detection was found together with VPN-status export or blocking signals."
+            AppRiskLevel.HIGH -> "A verifiable direct VPN, Tor, proxy, or VPN-app detection pattern was found."
+            AppRiskLevel.MEDIUM -> "Limited risk signals were found without enough correlation for high risk."
+            AppRiskLevel.LOW -> "Only weak diagnostic signals were found, with no warning."
+            AppRiskLevel.CLEAN -> noRiskSignals
+        }
+    }
+}
+
+fun MaydayStrings.appRiskFindingType(type: AppRiskFindingType): String {
+    return when (locale) {
+        AppLanguage.RU -> when (type) {
+            AppRiskFindingType.ANDROID_API -> "Android API"
+            AppRiskFindingType.NETWORK_INTERFACE -> "сетевые интерфейсы"
+            AppRiskFindingType.PROXY -> "proxy"
+            AppRiskFindingType.LINUX_PROC -> "сетевые таблицы"
+            AppRiskFindingType.VPN_APP_DISCOVERY -> "поиск VPN-приложений"
+            AppRiskFindingType.TOR -> "Tor"
+            AppRiskFindingType.TELEMETRY -> "телеметрия"
+            AppRiskFindingType.PACKAGE_VISIBILITY -> "список приложений"
+            AppRiskFindingType.NETWORK_PERMISSION -> "сетевое разрешение"
+            AppRiskFindingType.ROUTING -> "маршрутизация"
+            AppRiskFindingType.DNS -> "DNS"
+            AppRiskFindingType.LOCAL_PROXY -> "локальный proxy"
+            AppRiskFindingType.XRAY_API -> "Xray API"
+            AppRiskFindingType.CLASH_API -> "Clash API"
+            AppRiskFindingType.PUBLIC_IP -> "публичный IP"
+            AppRiskFindingType.BYPASS -> "обход маршрутизации"
+            AppRiskFindingType.ACTIVE_VPN -> "активный VPN"
+            AppRiskFindingType.COMBINED -> "связка признаков"
+            AppRiskFindingType.NETWORK_LIBRARY -> "сетевая библиотека"
+        }
+        AppLanguage.EN -> when (type) {
+            AppRiskFindingType.ANDROID_API -> "Android API"
+            AppRiskFindingType.NETWORK_INTERFACE -> "network interfaces"
+            AppRiskFindingType.PROXY -> "proxy"
+            AppRiskFindingType.LINUX_PROC -> "network tables"
+            AppRiskFindingType.VPN_APP_DISCOVERY -> "VPN app discovery"
+            AppRiskFindingType.TOR -> "Tor"
+            AppRiskFindingType.TELEMETRY -> "telemetry"
+            AppRiskFindingType.PACKAGE_VISIBILITY -> "app visibility"
+            AppRiskFindingType.NETWORK_PERMISSION -> "network permission"
+            AppRiskFindingType.ROUTING -> "routing"
+            AppRiskFindingType.DNS -> "DNS"
+            AppRiskFindingType.LOCAL_PROXY -> "local proxy"
+            AppRiskFindingType.XRAY_API -> "Xray API"
+            AppRiskFindingType.CLASH_API -> "Clash API"
+            AppRiskFindingType.PUBLIC_IP -> "public IP"
+            AppRiskFindingType.BYPASS -> "routing bypass"
+            AppRiskFindingType.ACTIVE_VPN -> "active VPN"
+            AppRiskFindingType.COMBINED -> "combined signals"
+            AppRiskFindingType.NETWORK_LIBRARY -> "network library"
+        }
+    }
+}
+
+fun MaydayStrings.appRiskSignalStrength(strength: AppRiskSignalStrength): String {
+    return when (locale) {
+        AppLanguage.RU -> when (strength) {
+            AppRiskSignalStrength.LOW -> "слабый"
+            AppRiskSignalStrength.MEDIUM -> "средний"
+            AppRiskSignalStrength.HIGH -> "сильный"
+        }
+        AppLanguage.EN -> when (strength) {
+            AppRiskSignalStrength.LOW -> "low"
+            AppRiskSignalStrength.MEDIUM -> "medium"
+            AppRiskSignalStrength.HIGH -> "high"
+        }
+    }
+}
 
 private fun russianServers(count: Int): String {
     val mod10 = count % 10
