@@ -113,6 +113,16 @@ class SettingsViewModel @Inject constructor(
             is SettingsUiEvent.SteadyStateBenchmarkChanged -> update {
                 copy(steadyStateBenchmarkEnabled = event.value, message = null)
             }
+            is SettingsUiEvent.MetricsEnabledChanged -> update {
+                copy(
+                    metrics = metrics.copy(
+                        enabled = event.value,
+                        fileEnabled = false,
+                        fileDir = "",
+                    ),
+                    message = null,
+                )
+            }
             is SettingsUiEvent.NetworkRescueProfileChanged -> update {
                 copy(networkRescueProfile = event.value, message = null)
             }
@@ -383,7 +393,7 @@ class SettingsViewModel @Inject constructor(
                     disableIpv6 = disableIpv6,
                     packetFragmentPayloadBytes = packetFragmentPayloadBytes,
                     disablePacketBatching = currentState.disablePacketBatching,
-                    metrics = currentState.metrics,
+                    metrics = currentState.metrics.copy(fileEnabled = false, fileDir = ""),
                     splitTunnelMode = latestProfile.splitTunnelMode,
                     selectedPackages = latestProfile.selectedPackages,
                     isAutoReconnectEnabled = currentState.autoReconnect,

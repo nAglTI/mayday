@@ -24,6 +24,7 @@ class VpnConfigImportParserTest {
         assertEquals(false, profile.prestartFullProbe)
         assertEquals(false, profile.steadyStateQuickProbeEnabled)
         assertEquals(false, profile.steadyStateBenchmarkEnabled)
+        assertEquals(false, profile.metrics.enabled)
         assertEquals(NetworkRescueProfile.STABLE, profile.networkRescueProfile)
         assertEquals(false, profile.disableIpv6)
         assertEquals(1280, profile.mtu)
@@ -135,6 +136,11 @@ class VpnConfigImportParserTest {
             tunnel_mtu: 1280
             packet_fragment_payload_bytes: 100
             disable_packet_batching: true
+            metrics:
+              enabled: true
+              window_seconds: 120
+              file_enabled: true
+              file_dir: "/tmp/ignored"
             future_admin_field:
               keep_me: yes
             discovery_relays:

@@ -24,6 +24,7 @@ sealed interface SettingsUiEvent {
     data class PrestartFullProbeChanged(val value: Boolean) : SettingsUiEvent
     data class SteadyStateQuickProbeChanged(val value: Boolean) : SettingsUiEvent
     data class SteadyStateBenchmarkChanged(val value: Boolean) : SettingsUiEvent
+    data class MetricsEnabledChanged(val value: Boolean) : SettingsUiEvent
     data class NetworkRescueProfileChanged(val value: NetworkRescueProfile) : SettingsUiEvent
     data class DisableIpv6Changed(val value: Boolean) : SettingsUiEvent
     data class PacketFragmentPayloadChanged(val value: String) : SettingsUiEvent

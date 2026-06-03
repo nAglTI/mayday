@@ -237,7 +237,7 @@ class DefaultVpnProfileRepository @Inject constructor(
         return runCatching {
             val json = JSONObject(metricsJson)
             VpnMetricsConfig(
-                enabled = false,
+                enabled = json.optFlexibleBoolean("enabled", default = false),
                 windowSeconds = json.optInt("window_seconds", 600).coerceAtLeast(1),
                 fileEnabled = false,
                 fileDir = "",
@@ -267,7 +267,7 @@ class DefaultVpnProfileRepository @Inject constructor(
 
     private fun encodeMetrics(metrics: VpnMetricsConfig): String {
         return JSONObject()
-            .put("enabled", false)
+            .put("enabled", metrics.enabled)
             .put("window_seconds", metrics.windowSeconds.coerceAtLeast(1))
             .put("file_enabled", false)
             .put("file_dir", "")

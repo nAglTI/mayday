@@ -27,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.CallSplit
 import androidx.compose.material.icons.automirrored.outlined.FactCheck
 import androidx.compose.material.icons.outlined.AllInclusive
+import androidx.compose.material.icons.outlined.Analytics
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.HealthAndSafety
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
@@ -336,6 +337,12 @@ internal fun SettingsScreen(
                             icon = Icons.Outlined.Sync,
                             checked = state.steadyStateBenchmarkEnabled,
                             onCheckedChange = { onEvent(SettingsUiEvent.SteadyStateBenchmarkChanged(it)) },
+                        )
+                        SettingSwitchRow(
+                            copy = advancedSettingCopy(strings, AdvancedSettingCopyKey.Metrics),
+                            icon = Icons.Outlined.Analytics,
+                            checked = state.metrics.enabled,
+                            onCheckedChange = { onEvent(SettingsUiEvent.MetricsEnabledChanged(it)) },
                         )
                         SettingsField(
                             label = strings.tun,
@@ -989,6 +996,7 @@ private enum class AdvancedSettingCopyKey {
     PrestartFullProbe,
     SteadyStateQuickProbe,
     SteadyStateBenchmark,
+    Metrics,
 }
 
 private data class AdvancedSettingCopy(
@@ -1034,6 +1042,10 @@ private fun advancedSettingCopy(
                 title = "Фоновый замер скорости",
                 subtitle = "Разрешает более тяжелую проверку качества канала.",
             )
+            AdvancedSettingCopyKey.Metrics -> AdvancedSettingCopy(
+                title = "Метрики соединения",
+                subtitle = "Выключены по умолчанию. Включайте только для диагностики качества и производительности.",
+            )
         }
         AppLanguage.EN -> when (key) {
             AdvancedSettingCopyKey.NetworkRescue -> AdvancedSettingCopy(
@@ -1067,6 +1079,10 @@ private fun advancedSettingCopy(
             AdvancedSettingCopyKey.SteadyStateBenchmark -> AdvancedSettingCopy(
                 title = "Background speed benchmark",
                 subtitle = "Allows heavier channel quality checks in the background.",
+            )
+            AdvancedSettingCopyKey.Metrics -> AdvancedSettingCopy(
+                title = "Connection metrics",
+                subtitle = "Off by default. Enable only when diagnosing quality or performance.",
             )
         }
     }

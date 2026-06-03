@@ -1,6 +1,7 @@
 package org.debs.mayday.core.gomobile.bridge
 
 import org.debs.mayday.core.model.SplitTunnelMode
+import org.debs.mayday.core.model.VpnMetricsConfig
 import org.debs.mayday.core.model.VpnProfile
 import org.debs.mayday.core.model.VpnProfileCompatibilityValidator
 import org.json.JSONArray
@@ -39,6 +40,7 @@ class VpnCoreConfigEncoder @Inject constructor() {
             .put("tunnel_mtu", normalizeTunnelMtu(profile))
             .put("packet_fragment_payload_bytes", normalizePacketFragmentPayloadBytes(profile))
             .put("disable_packet_batching", profile.disablePacketBatching)
+            .put("metrics", buildClientMetrics(profile.metrics))
             .put("discovery_relays", buildRelaysArray(profile))
             .put("transport", JSONObject().put("mode", profile.transportMode.wireValue))
             .put("servers", buildServersArray(profile))
@@ -116,6 +118,14 @@ class VpnCoreConfigEncoder @Inject constructor() {
         return JSONObject()
             .put("enabled", profile.networkRescueProfile.isEnabled)
             .put("profile", profile.networkRescueProfile.wireValue)
+    }
+
+    private fun buildClientMetrics(metrics: VpnMetricsConfig): JSONObject {
+        return JSONObject()
+            .put("enabled", metrics.enabled)
+            .put("window_seconds", metrics.windowSeconds.coerceAtLeast(1))
+            .put("file_enabled", false)
+            .put("file_dir", "")
     }
 
     private fun SplitTunnelMode.toWireValue(): String = when (this) {
