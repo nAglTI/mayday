@@ -6,4 +6,5 @@ data class RelayDraft(
     val shortId: String = "1",
     val relayKey: String = "",
     val transportPorts: Map<String, List<Int>> = emptyMap(),
+    val endpointAddrs: List<String> = emptyList(),
 )

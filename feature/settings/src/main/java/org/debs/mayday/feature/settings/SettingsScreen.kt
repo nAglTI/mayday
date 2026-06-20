@@ -319,6 +319,18 @@ internal fun SettingsScreen(
                             checked = state.disablePacketBatching,
                             onCheckedChange = { onEvent(SettingsUiEvent.DisablePacketBatchingChanged(it)) },
                         )
+                        SettingsNumberSettingRow(
+                            copy = advancedSettingCopy(strings, AdvancedSettingCopyKey.PacketPaddingMin),
+                            icon = Icons.Outlined.Tune,
+                            value = state.packetPaddingMinBytes,
+                            onValueChange = { onEvent(SettingsUiEvent.PacketPaddingMinChanged(it)) },
+                        )
+                        SettingsNumberSettingRow(
+                            copy = advancedSettingCopy(strings, AdvancedSettingCopyKey.PacketPaddingMax),
+                            icon = Icons.Outlined.Tune,
+                            value = state.packetPaddingMaxBytes,
+                            onValueChange = { onEvent(SettingsUiEvent.PacketPaddingMaxChanged(it)) },
+                        )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         SettingSwitchRow(
                             copy = advancedSettingCopy(strings, AdvancedSettingCopyKey.PrestartFullProbe),
@@ -993,6 +1005,8 @@ private enum class AdvancedSettingCopyKey {
     DisableIpv6,
     PacketFragment,
     DisablePacketBatching,
+    PacketPaddingMin,
+    PacketPaddingMax,
     PrestartFullProbe,
     SteadyStateQuickProbe,
     SteadyStateBenchmark,
@@ -1029,6 +1043,14 @@ private fun advancedSettingCopy(
             AdvancedSettingCopyKey.DisablePacketBatching -> AdvancedSettingCopy(
                 title = "Отключить группировку пакетов",
                 subtitle = "Помогает вместе с малым фрагментом на нестабильных каналах.",
+            )
+            AdvancedSettingCopyKey.PacketPaddingMin -> AdvancedSettingCopy(
+                title = "\u041c\u0438\u043d\u0438\u043c\u0430\u043b\u044c\u043d\u044b\u0439 padding \u043f\u0430\u043a\u0435\u0442\u0430",
+                subtitle = "0 \u0432\u043c\u0435\u0441\u0442\u0435 \u0441 \u043c\u0430\u043a\u0441\u0438\u043c\u0443\u043c\u043e\u043c \u043e\u0442\u043a\u043b\u044e\u0447\u0430\u0435\u0442 padding. \u0414\u0438\u0430\u043f\u0430\u0437\u043e\u043d: 0-1200 \u0431\u0430\u0439\u0442.",
+            )
+            AdvancedSettingCopyKey.PacketPaddingMax -> AdvancedSettingCopy(
+                title = "\u041c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u044b\u0439 padding \u043f\u0430\u043a\u0435\u0442\u0430",
+                subtitle = "\u0414\u043e\u043b\u0436\u0435\u043d \u0431\u044b\u0442\u044c \u0431\u043e\u043b\u044c\u0448\u0435 \u043c\u0438\u043d\u0438\u043c\u0443\u043c\u0430. \u041f\u0440\u0435\u0441\u0435\u0442\u044b: 0/128 \u0438\u043b\u0438 24/256.",
             )
             AdvancedSettingCopyKey.PrestartFullProbe -> AdvancedSettingCopy(
                 title = "Полная проверка перед подключением",
@@ -1067,6 +1089,14 @@ private fun advancedSettingCopy(
             AdvancedSettingCopyKey.DisablePacketBatching -> AdvancedSettingCopy(
                 title = "Disable packet batching",
                 subtitle = "Pairs with small fragments on unstable links.",
+            )
+            AdvancedSettingCopyKey.PacketPaddingMin -> AdvancedSettingCopy(
+                title = "Packet padding minimum",
+                subtitle = "0 with maximum 0 disables padding. Range: 0-1200 bytes.",
+            )
+            AdvancedSettingCopyKey.PacketPaddingMax -> AdvancedSettingCopy(
+                title = "Packet padding maximum",
+                subtitle = "Must be greater than the minimum. Presets: 0/128 or 24/256.",
             )
             AdvancedSettingCopyKey.PrestartFullProbe -> AdvancedSettingCopy(
                 title = "Full check before connecting",
@@ -1241,6 +1271,8 @@ private fun previewSettingsState(
         transportMode = VpnTransportMode.AUTO,
         packetFragmentPayloadBytes = "100",
         disablePacketBatching = true,
+        packetPaddingMinBytes = "0",
+        packetPaddingMaxBytes = "128",
         autoReconnect = true,
         splitTunnelMode = SplitTunnelMode.ONLY_SELECTED,
         selectedPackageCount = 6,

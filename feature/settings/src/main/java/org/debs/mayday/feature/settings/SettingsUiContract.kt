@@ -29,6 +29,8 @@ sealed interface SettingsUiEvent {
     data class DisableIpv6Changed(val value: Boolean) : SettingsUiEvent
     data class PacketFragmentPayloadChanged(val value: String) : SettingsUiEvent
     data class DisablePacketBatchingChanged(val value: Boolean) : SettingsUiEvent
+    data class PacketPaddingMinChanged(val value: String) : SettingsUiEvent
+    data class PacketPaddingMaxChanged(val value: String) : SettingsUiEvent
     data class AutoReconnectChanged(val value: Boolean) : SettingsUiEvent
     data class ThemeModeChanged(val value: AppThemeMode) : SettingsUiEvent
     data class LanguageChanged(val value: AppLanguage) : SettingsUiEvent

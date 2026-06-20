@@ -128,6 +128,7 @@ class VpnConfigImportParser @Inject constructor() {
 
     private fun parseJson(rawConfig: String, currentProfileName: String): VpnProfile {
         val json = JSONObject(rawConfig)
+        requireSupportedConfigVersion(json.opt("config_version"))
         val transportMode = parseTransportMode(json.optJSONObject("transport")?.opt("mode"))
         return profileFromMap(
             profileName = currentProfileName,
@@ -153,6 +154,8 @@ class VpnConfigImportParser @Inject constructor() {
                 json.opt("packet_fragment_payload_bytes"),
             ),
             disablePacketBatching = json.opt("disable_packet_batching").toBoolean(default = false),
+            packetPaddingMinBytes = normalizePacketPaddingBytes(json.opt("packet_padding_min_bytes")),
+            packetPaddingMaxBytes = normalizePacketPaddingBytes(json.opt("packet_padding_max_bytes")),
             metrics = parseMetrics(json.optJSONObject("metrics")),
             servers = json.optJSONArray("servers") ?: JSONArray(),
             splitTunnel = json.optJSONObject("split_tunnel"),
@@ -163,6 +166,7 @@ class VpnConfigImportParser @Inject constructor() {
     private fun parseYaml(rawConfig: String, currentProfileName: String): VpnProfile {
         val yaml = Yaml(SafeConstructor(LoaderOptions())).load<Any?>(rawConfig)
         require(yaml is Map<*, *>) { "Import key must decode to a YAML or JSON config." }
+        requireSupportedConfigVersion(yaml["config_version"])
         val preservedConfigJson = yaml.toJsonObject().toString()
 
         val relays = JSONArray()
@@ -177,6 +181,15 @@ class VpnConfigImportParser @Inject constructor() {
                         .put(
                             "transport_ports",
                             (item["transport_ports"] as? Map<*, *>)?.toJsonObject() ?: JSONObject(),
+                        )
+                        .put(
+                            "endpoint_addrs",
+                            JSONArray(
+                                (item["endpoint_addrs"] as? List<*>)
+                                    ?.map { it.toString().trim() }
+                                    ?.filter(String::isNotBlank)
+                                    .orEmpty(),
+                            ),
                         )
                 )
             }
@@ -228,6 +241,8 @@ class VpnConfigImportParser @Inject constructor() {
                 yaml["packet_fragment_payload_bytes"],
             ),
             disablePacketBatching = yaml["disable_packet_batching"].toBoolean(default = false),
+            packetPaddingMinBytes = normalizePacketPaddingBytes(yaml["packet_padding_min_bytes"]),
+            packetPaddingMaxBytes = normalizePacketPaddingBytes(yaml["packet_padding_max_bytes"]),
             metrics = parseMetrics(yaml["metrics"] as? Map<*, *>),
             servers = servers,
             splitTunnel = splitTunnel,
@@ -251,6 +266,8 @@ class VpnConfigImportParser @Inject constructor() {
         disableIpv6: Boolean,
         packetFragmentPayloadBytes: Int,
         disablePacketBatching: Boolean,
+        packetPaddingMinBytes: Int,
+        packetPaddingMaxBytes: Int,
         metrics: VpnMetricsConfig,
         servers: JSONArray,
         splitTunnel: JSONObject?,
@@ -322,6 +339,8 @@ class VpnConfigImportParser @Inject constructor() {
             disableIpv6 = disableIpv6,
             packetFragmentPayloadBytes = packetFragmentPayloadBytes,
             disablePacketBatching = disablePacketBatching,
+            packetPaddingMinBytes = packetPaddingMinBytes,
+            packetPaddingMaxBytes = packetPaddingMaxBytes,
             metrics = metrics,
             splitTunnelMode = if (splitTunnel?.optBoolean("enabled", false) == true) {
                 splitMode
@@ -349,10 +368,23 @@ class VpnConfigImportParser @Inject constructor() {
                         shortId = item.optInt("short_id", index + 1).coerceAtLeast(1),
                         relayKey = item.optString("relay_key").trim(),
                         transportPorts = item.optJSONObject("transport_ports").parseTransportPorts(),
+                        endpointAddrs = item.optJSONArray("endpoint_addrs").parseStringList(),
                     ),
                 )
             }
         }
+    }
+
+    private fun JSONArray?.parseStringList(): List<String> {
+        val array = this ?: return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                val value = array.optString(index).trim()
+                if (value.isNotBlank()) {
+                    add(value)
+                }
+            }
+        }.distinct()
     }
 
     private fun parseMetrics(json: JSONObject?): VpnMetricsConfig {
@@ -450,6 +482,30 @@ class VpnConfigImportParser @Inject constructor() {
         return value
     }
 
+    private fun normalizePacketPaddingBytes(rawValue: Any?): Int {
+        val value = rawValue.toIntOrNull(default = 0)
+        require(value in 0..1200) {
+            "packet padding must be from 0 to 1200 bytes."
+        }
+        return value
+    }
+
+    private fun requireSupportedConfigVersion(rawValue: Any?) {
+        if (rawValue == null || rawValue == JSONObject.NULL) {
+            return
+        }
+        val version = when (rawValue) {
+            is Number -> rawValue.toInt()
+            else -> rawValue.toString().trim().toIntOrNull()
+        }
+        require(version != null) {
+            "config_version must be an integer."
+        }
+        require(version <= SUPPORTED_CONFIG_VERSION) {
+            "Import key is not compatible with this app version. Please update the app or get a new key."
+        }
+    }
+
     private fun JSONArray?.parsePorts(): List<Int> {
         if (this == null) {
             return emptyList()
@@ -545,5 +601,6 @@ class VpnConfigImportParser @Inject constructor() {
         )
         val BASE64_PAYLOAD_PATTERN = Regex("^[A-Za-z0-9+/_=-]+$")
         val SERVER_KEY_PATTERN = Regex("^[0-9a-fA-F]{64}$")
+        const val SUPPORTED_CONFIG_VERSION = 1
     }
 }

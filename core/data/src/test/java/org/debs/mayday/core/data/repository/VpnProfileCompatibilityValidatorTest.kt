@@ -80,11 +80,25 @@ class VpnProfileCompatibilityValidatorTest {
         assertEquals(VpnProfileCompatibilityIssueType.INVALID_RELAY_ADDRESS, issue?.type)
     }
 
+    @Test
+    fun packetPaddingMustBeDisabledOrRandomRange() {
+        val issue = VpnProfileCompatibilityValidator.firstIssue(
+            validProfile(
+                packetPaddingMinBytes = 64,
+                packetPaddingMaxBytes = 64,
+            ),
+        )
+
+        assertEquals(VpnProfileCompatibilityIssueType.INVALID_PACKET_PADDING, issue?.type)
+    }
+
     private fun validProfile(
         relayKey: String = HEX_64,
         transportMode: VpnTransportMode = VpnTransportMode.AUTO,
         transportPorts: Map<String, List<Int>> = DEFAULT_TRANSPORT_PORTS,
         relayAddress: String = "relay.example.net",
+        packetPaddingMinBytes: Int = 0,
+        packetPaddingMaxBytes: Int = 0,
     ): VpnProfile {
         return VpnProfile(
             relays = listOf(
@@ -105,6 +119,8 @@ class VpnProfileCompatibilityValidatorTest {
                 ),
             ),
             transportMode = transportMode,
+            packetPaddingMinBytes = packetPaddingMinBytes,
+            packetPaddingMaxBytes = packetPaddingMaxBytes,
         )
     }
 

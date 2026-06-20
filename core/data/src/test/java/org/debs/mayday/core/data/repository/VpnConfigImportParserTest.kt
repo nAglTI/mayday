@@ -30,11 +30,14 @@ class VpnConfigImportParserTest {
         assertEquals(1280, profile.mtu)
         assertEquals(100, profile.packetFragmentPayloadBytes)
         assertEquals(true, profile.disablePacketBatching)
+        assertEquals(24, profile.packetPaddingMinBytes)
+        assertEquals(256, profile.packetPaddingMaxBytes)
         assertEquals(1, profile.relays.size)
         assertEquals("relay-main", profile.relays.single().id)
         assertEquals("relay.example.net", profile.relays.single().addr)
         assertEquals(2, profile.relays.single().shortId)
         assertEquals(HEX_A, profile.relays.single().relayKey)
+        assertEquals(listOf("relay-alt.example.net", "relay-alt-2.example.net"), profile.relays.single().endpointAddrs)
         assertEquals(
             mapOf(
                 "bt-utp" to listOf(52021, 52022),
@@ -108,6 +111,15 @@ class VpnConfigImportParserTest {
     }
 
     @Test
+    fun rejectsFutureConfigVersion() {
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            parser.parse(importKey(validYamlConfig().replace("config_version: 1", "config_version: 2")))
+        }
+
+        assertTrue(error.message.orEmpty().contains("app version"))
+    }
+
+    @Test
     fun rejectsRawYamlWithoutImportKey() {
         val error = assertThrows(IllegalArgumentException::class.java) {
             parser.parse(validYamlConfig())
@@ -122,6 +134,7 @@ class VpnConfigImportParserTest {
 
     private fun validYamlConfig(): String {
         return """
+            config_version: 1
             user_id: 42
             server_failback_delay_sec: 60
             transport:
@@ -136,6 +149,8 @@ class VpnConfigImportParserTest {
             tunnel_mtu: 1280
             packet_fragment_payload_bytes: 100
             disable_packet_batching: true
+            packet_padding_min_bytes: 24
+            packet_padding_max_bytes: 256
             metrics:
               enabled: true
               window_seconds: 120
@@ -146,6 +161,9 @@ class VpnConfigImportParserTest {
             discovery_relays:
               - id: relay-main
                 addr: relay.example.net
+                endpoint_addrs:
+                  - relay-alt.example.net
+                  - relay-alt-2.example.net
                 short_id: 2
                 relay_key: "$HEX_A"
                 transport_ports:

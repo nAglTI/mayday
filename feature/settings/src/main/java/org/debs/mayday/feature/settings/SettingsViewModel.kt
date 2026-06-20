@@ -135,6 +135,12 @@ class SettingsViewModel @Inject constructor(
             is SettingsUiEvent.DisablePacketBatchingChanged -> update {
                 copy(disablePacketBatching = event.value, message = null)
             }
+            is SettingsUiEvent.PacketPaddingMinChanged -> update {
+                copy(packetPaddingMinBytes = event.value, message = null)
+            }
+            is SettingsUiEvent.PacketPaddingMaxChanged -> update {
+                copy(packetPaddingMaxBytes = event.value, message = null)
+            }
             is SettingsUiEvent.AutoReconnectChanged -> update {
                 copy(autoReconnect = event.value, message = null)
             }
@@ -335,6 +341,10 @@ class SettingsViewModel @Inject constructor(
                 val packetFragmentPayloadBytes = parsePacketFragmentPayloadBytes(
                     currentState.packetFragmentPayloadBytes,
                 )
+                val packetPadding = parsePacketPaddingBytes(
+                    rawMin = currentState.packetPaddingMinBytes,
+                    rawMax = currentState.packetPaddingMaxBytes,
+                )
                 val relays = currentState.relays.mapIndexedNotNull { index, draft ->
                     val addr = draft.addr.trim()
                     if (addr.isBlank()) {
@@ -346,6 +356,7 @@ class SettingsViewModel @Inject constructor(
                             shortId = draft.shortId.toIntOrNull()?.coerceAtLeast(1) ?: (index + 1),
                             relayKey = draft.relayKey.trim(),
                             transportPorts = draft.transportPorts,
+                            endpointAddrs = draft.endpointAddrs,
                         )
                     }
                 }.also { parsedRelays ->
@@ -393,6 +404,8 @@ class SettingsViewModel @Inject constructor(
                     disableIpv6 = disableIpv6,
                     packetFragmentPayloadBytes = packetFragmentPayloadBytes,
                     disablePacketBatching = currentState.disablePacketBatching,
+                    packetPaddingMinBytes = packetPadding.first,
+                    packetPaddingMaxBytes = packetPadding.second,
                     metrics = currentState.metrics.copy(fileEnabled = false, fileDir = ""),
                     splitTunnelMode = latestProfile.splitTunnelMode,
                     selectedPackages = latestProfile.selectedPackages,
@@ -507,6 +520,18 @@ class SettingsViewModel @Inject constructor(
         return value
     }
 
+    private fun parsePacketPaddingBytes(rawMin: String, rawMax: String): Pair<Int, Int> {
+        val min = rawMin.trim().ifBlank { "0" }.toIntOrNull()
+        val max = rawMax.trim().ifBlank { "0" }.toIntOrNull()
+        require(min != null && max != null && min in 0..1200 && max in 0..1200) {
+            "packet padding must be 0..1200 bytes."
+        }
+        require((min == 0 && max == 0) || min < max) {
+            "packet padding must be 0/0 or a random min/max range."
+        }
+        return min to max
+    }
+
     private fun strings() = maydayStrings(uiState.value.uiPreferences.language)
 
     private fun VpnProfile.toUiState(
@@ -523,6 +548,7 @@ class SettingsViewModel @Inject constructor(
                     shortId = it.shortId.toString(),
                     relayKey = it.relayKey,
                     transportPorts = it.transportPorts,
+                    endpointAddrs = it.endpointAddrs,
                 )
             }.ifEmpty { listOf(RelayDraft()) },
             userId = userId,
@@ -546,6 +572,8 @@ class SettingsViewModel @Inject constructor(
             disableIpv6 = disableIpv6,
             packetFragmentPayloadBytes = packetFragmentPayloadBytes.toString(),
             disablePacketBatching = disablePacketBatching,
+            packetPaddingMinBytes = packetPaddingMinBytes.toString(),
+            packetPaddingMaxBytes = packetPaddingMaxBytes.toString(),
             metrics = metrics,
             autoReconnect = isAutoReconnectEnabled,
             splitTunnelMode = splitTunnelMode,
@@ -570,6 +598,7 @@ class SettingsViewModel @Inject constructor(
                     shortId = relay.shortId,
                     relayKey = relay.relayKey,
                     transportPorts = relay.transportPorts,
+                    endpointAddrs = relay.endpointAddrs,
                 )
             },
             userId = userId,
@@ -592,6 +621,8 @@ class SettingsViewModel @Inject constructor(
             disableIpv6 = disableIpv6,
             packetFragmentPayloadBytes = packetFragmentPayloadBytes,
             disablePacketBatching = disablePacketBatching,
+            packetPaddingMinBytes = packetPaddingMinBytes,
+            packetPaddingMaxBytes = packetPaddingMaxBytes,
             metrics = metrics,
             autoReconnect = autoReconnect,
             preservedConfigJson = preservedConfigJson,
@@ -625,6 +656,8 @@ private data class SettingsConfigSnapshot(
     val disableIpv6: Boolean,
     val packetFragmentPayloadBytes: String,
     val disablePacketBatching: Boolean,
+    val packetPaddingMinBytes: String,
+    val packetPaddingMaxBytes: String,
     val metrics: VpnMetricsConfig,
     val autoReconnect: Boolean,
     val preservedConfigJson: String,
@@ -636,6 +669,7 @@ private data class RelayConfigSnapshot(
     val shortId: String,
     val relayKey: String,
     val transportPorts: Map<String, List<Int>>,
+    val endpointAddrs: List<String>,
 )
 
 private data class ServerConfigSnapshot(
