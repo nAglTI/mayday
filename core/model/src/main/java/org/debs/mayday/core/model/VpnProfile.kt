@@ -17,6 +17,8 @@ data class VpnProfile(
     val disableIpv6: Boolean = false,
     val packetFragmentPayloadBytes: Int = 0,
     val disablePacketBatching: Boolean = false,
+    val packetPaddingMinBytes: Int = 0,
+    val packetPaddingMaxBytes: Int = 0,
     val metrics: VpnMetricsConfig = VpnMetricsConfig(),
     val splitTunnelMode: SplitTunnelMode = SplitTunnelMode.DISABLED,
     val selectedPackages: Set<String> = emptySet(),

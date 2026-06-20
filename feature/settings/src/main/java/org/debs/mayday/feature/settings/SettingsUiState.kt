@@ -27,6 +27,8 @@ data class SettingsUiState(
     val disableIpv6: Boolean = false,
     val packetFragmentPayloadBytes: String = "0",
     val disablePacketBatching: Boolean = false,
+    val packetPaddingMinBytes: String = "0",
+    val packetPaddingMaxBytes: String = "0",
     val metrics: VpnMetricsConfig = VpnMetricsConfig(),
     val autoReconnect: Boolean = true,
     val splitTunnelMode: SplitTunnelMode = SplitTunnelMode.DISABLED,

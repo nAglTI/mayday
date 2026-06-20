@@ -25,6 +25,11 @@ object VpnProfileCompatibilityValidator {
                 VpnProfileCompatibilityIssueType.INVALID_PACKET_FRAGMENT_PAYLOAD,
             )
         }
+        if (!profile.isPacketPaddingValid()) {
+            return VpnProfileCompatibilityIssue(
+                VpnProfileCompatibilityIssueType.INVALID_PACKET_PADDING,
+            )
+        }
 
         val shortIds = mutableSetOf<Int>()
         profile.relays.forEach { relay ->
@@ -78,6 +83,16 @@ object VpnProfileCompatibilityValidator {
         }
     }
 
+    private fun VpnProfile.isPacketPaddingValid(): Boolean {
+        if (packetPaddingMinBytes !in 0..1200 || packetPaddingMaxBytes !in 0..1200) {
+            return false
+        }
+        if (packetPaddingMinBytes == 0 && packetPaddingMaxBytes == 0) {
+            return true
+        }
+        return packetPaddingMinBytes < packetPaddingMaxBytes
+    }
+
     private fun VpnRelayTarget.hasUsableTransportPorts(transportMode: VpnTransportMode): Boolean {
         val validTransportPorts = transportPorts
             .filterKeys(String::isNotBlank)
@@ -113,5 +128,6 @@ enum class VpnProfileCompatibilityIssueType {
     INVALID_SERVER_FAILBACK_DELAY,
     INVALID_TUNNEL_MTU,
     INVALID_PACKET_FRAGMENT_PAYLOAD,
+    INVALID_PACKET_PADDING,
     MISSING_RELAY_TRANSPORT_PORTS,
 }

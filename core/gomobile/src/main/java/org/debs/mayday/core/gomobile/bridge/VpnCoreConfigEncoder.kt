@@ -4,6 +4,7 @@ import org.debs.mayday.core.model.SplitTunnelMode
 import org.debs.mayday.core.model.VpnMetricsConfig
 import org.debs.mayday.core.model.VpnProfile
 import org.debs.mayday.core.model.VpnProfileCompatibilityValidator
+import org.debs.mayday.core.model.VpnRelayTarget
 import org.json.JSONArray
 import org.json.JSONObject
 import javax.inject.Inject
@@ -29,7 +30,10 @@ class VpnCoreConfigEncoder @Inject constructor() {
 
         root.remove("relay")
         root.remove("relays")
+        val preservedRelays = root.optJSONArray("discovery_relays")
+        val preservedTransport = root.optJSONObject("transport")
         root
+            .put("config_version", SUPPORTED_CONFIG_VERSION)
             .put("user_id", userId)
             .put("server_failback_delay_sec", normalizeServerFailbackDelay(profile.serverFailbackDelaySec))
             .put("prestart_full_probe", profile.prestartFullProbe)
@@ -40,23 +44,33 @@ class VpnCoreConfigEncoder @Inject constructor() {
             .put("tunnel_mtu", normalizeTunnelMtu(profile))
             .put("packet_fragment_payload_bytes", normalizePacketFragmentPayloadBytes(profile))
             .put("disable_packet_batching", profile.disablePacketBatching)
+            .put("packet_padding_min_bytes", normalizePacketPaddingMinBytes(profile))
+            .put("packet_padding_max_bytes", normalizePacketPaddingMaxBytes(profile))
             .put("metrics", buildClientMetrics(profile.metrics))
-            .put("discovery_relays", buildRelaysArray(profile))
-            .put("transport", JSONObject().put("mode", profile.transportMode.wireValue))
+            .put("discovery_relays", buildRelaysArray(profile, preservedRelays))
+            .put("transport", buildTransport(profile, preservedTransport))
             .put("servers", buildServersArray(profile))
             .put("split_tunnel", buildSplitTunnel(profile))
 
         return root.toString()
     }
 
-    private fun buildRelaysArray(profile: VpnProfile): JSONArray {
+    private fun buildRelaysArray(
+        profile: VpnProfile,
+        preservedRelays: JSONArray?,
+    ): JSONArray {
         val array = JSONArray()
         profile.relays.forEachIndexed { index, relay ->
             val addr = relay.addr.trim()
             require(addr.isNotBlank()) { "Relay address is required." }
             val relayKey = relay.relayKey.trim()
+            val endpointAddrs = relay.endpointAddrs.normalizedEndpointAddrs()
+            val relayJson = preservedRelays.findPreservedRelay(index, relay) ?: JSONObject()
+            if (endpointAddrs.isNotEmpty()) {
+                relayJson.put("endpoint_addrs", JSONArray(endpointAddrs))
+            }
             array.put(
-                JSONObject()
+                relayJson
                     .put("id", relay.id.trim().ifBlank { "relay-${index + 1}" })
                     .put("addr", addr)
                     .put("short_id", relay.shortId.coerceAtLeast(1))
@@ -69,6 +83,14 @@ class VpnCoreConfigEncoder @Inject constructor() {
             )
         }
         return array
+    }
+
+    private fun buildTransport(
+        profile: VpnProfile,
+        preservedTransport: JSONObject?,
+    ): JSONObject {
+        val transport = preservedTransport?.let { JSONObject(it.toString()) } ?: JSONObject()
+        return transport.put("mode", profile.transportMode.wireValue)
     }
 
     private fun buildServersArray(profile: VpnProfile): JSONArray {
@@ -146,6 +168,36 @@ class VpnCoreConfigEncoder @Inject constructor() {
         return json
     }
 
+    private fun JSONArray?.findPreservedRelay(
+        index: Int,
+        relay: VpnRelayTarget,
+    ): JSONObject? {
+        val array = this ?: return null
+        val relayId = relay.id.trim()
+        if (relayId.isNotBlank()) {
+            for (candidateIndex in 0 until array.length()) {
+                val candidate = array.optJSONObject(candidateIndex) ?: continue
+                if (candidate.optString("id").trim() == relayId) {
+                    return JSONObject(candidate.toString())
+                }
+            }
+        }
+
+        val shortId = relay.shortId.coerceAtLeast(1)
+        for (candidateIndex in 0 until array.length()) {
+            val candidate = array.optJSONObject(candidateIndex) ?: continue
+            if (candidate.optInt("short_id", -1) == shortId) {
+                return JSONObject(candidate.toString())
+            }
+        }
+
+        return array.optJSONObject(index)?.let { JSONObject(it.toString()) }
+    }
+
+    private fun List<String>.normalizedEndpointAddrs(): List<String> {
+        return map(String::trim).filter(String::isNotBlank).distinct()
+    }
+
     private fun normalizeServerFailbackDelay(value: Int): Int {
         require(value == -1 || value >= 0) {
             "server_failback_delay_sec must be -1, 0, or a positive integer."
@@ -169,7 +221,32 @@ class VpnCoreConfigEncoder @Inject constructor() {
         return value
     }
 
+    private fun normalizePacketPaddingMinBytes(profile: VpnProfile): Int {
+        require(isPacketPaddingValid(profile)) {
+            "packet padding must be 0/0 or a random range from 0 to 1200 bytes."
+        }
+        return profile.packetPaddingMinBytes
+    }
+
+    private fun normalizePacketPaddingMaxBytes(profile: VpnProfile): Int {
+        require(isPacketPaddingValid(profile)) {
+            "packet padding must be 0/0 or a random range from 0 to 1200 bytes."
+        }
+        return profile.packetPaddingMaxBytes
+    }
+
+    private fun isPacketPaddingValid(profile: VpnProfile): Boolean {
+        if (profile.packetPaddingMinBytes !in 0..1200 || profile.packetPaddingMaxBytes !in 0..1200) {
+            return false
+        }
+        if (profile.packetPaddingMinBytes == 0 && profile.packetPaddingMaxBytes == 0) {
+            return true
+        }
+        return profile.packetPaddingMinBytes < profile.packetPaddingMaxBytes
+    }
+
     private companion object {
+        const val SUPPORTED_CONFIG_VERSION = 1
         val SERVER_KEY_PATTERN = Regex("^[0-9a-fA-F]{64}$")
     }
 }

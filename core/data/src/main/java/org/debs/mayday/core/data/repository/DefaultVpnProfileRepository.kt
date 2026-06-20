@@ -61,6 +61,8 @@ class DefaultVpnProfileRepository @Inject constructor(
             disableIpv6 = disableIpv6,
             packetFragmentPayloadBytes = preferences[PACKET_FRAGMENT_PAYLOAD_BYTES] ?: 0,
             disablePacketBatching = preferences[DISABLE_PACKET_BATCHING] ?: false,
+            packetPaddingMinBytes = preferences[PACKET_PADDING_MIN_BYTES] ?: 0,
+            packetPaddingMaxBytes = preferences[PACKET_PADDING_MAX_BYTES] ?: 0,
             metrics = readMetrics(preferences),
             splitTunnelMode = SplitTunnelMode.entries.getOrElse(
                 preferences[SPLIT_MODE] ?: SplitTunnelMode.DISABLED.ordinal,
@@ -112,6 +114,8 @@ class DefaultVpnProfileRepository @Inject constructor(
             preferences[DISABLE_IPV6] = profile.disableIpv6
             preferences[PACKET_FRAGMENT_PAYLOAD_BYTES] = profile.packetFragmentPayloadBytes
             preferences[DISABLE_PACKET_BATCHING] = profile.disablePacketBatching
+            preferences[PACKET_PADDING_MIN_BYTES] = profile.packetPaddingMinBytes.coerceIn(0, 1200)
+            preferences[PACKET_PADDING_MAX_BYTES] = profile.packetPaddingMaxBytes.coerceIn(0, 1200)
             preferences[METRICS_JSON] = encodeMetrics(profile.metrics)
             preferences[SPLIT_MODE] = profile.splitTunnelMode.ordinal
             preferences[SELECTED_PACKAGES] = profile.selectedPackages
@@ -150,6 +154,8 @@ class DefaultVpnProfileRepository @Inject constructor(
         val DISABLE_IPV6 = booleanPreferencesKey("disable_ipv6")
         val PACKET_FRAGMENT_PAYLOAD_BYTES = intPreferencesKey("packet_fragment_payload_bytes")
         val DISABLE_PACKET_BATCHING = booleanPreferencesKey("disable_packet_batching")
+        val PACKET_PADDING_MIN_BYTES = intPreferencesKey("packet_padding_min_bytes")
+        val PACKET_PADDING_MAX_BYTES = intPreferencesKey("packet_padding_max_bytes")
         val METRICS_JSON = stringPreferencesKey("metrics_json")
         val SPLIT_MODE = intPreferencesKey("split_mode")
         val SELECTED_PACKAGES = stringPreferencesKey("selected_packages")
@@ -179,6 +185,7 @@ class DefaultVpnProfileRepository @Inject constructor(
                             shortId = item.optInt("short_id", index + 1).coerceAtLeast(1),
                             relayKey = item.optString("relay_key").trim(),
                             transportPorts = item.optTransportPorts(),
+                            endpointAddrs = item.optStringList("endpoint_addrs"),
                         ),
                     )
                 }
@@ -222,7 +229,8 @@ class DefaultVpnProfileRepository @Inject constructor(
                     .put("addr", addr)
                     .put("short_id", relay.shortId.coerceAtLeast(1))
                     .put("relay_key", relay.relayKey.trim())
-                    .put("transport_ports", relay.transportPorts.toTransportPortsJson()),
+                    .put("transport_ports", relay.transportPorts.toTransportPortsJson())
+                    .put("endpoint_addrs", JSONArray(relay.endpointAddrs.normalizedEndpointAddrs())),
             )
         }
         return array.toString()
@@ -322,6 +330,22 @@ class DefaultVpnProfileRepository @Inject constructor(
                 }
             }
         }
+    }
+
+    private fun JSONObject.optStringList(name: String): List<String> {
+        val array = optJSONArray(name) ?: return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                val value = array.optString(index).trim()
+                if (value.isNotBlank()) {
+                    add(value)
+                }
+            }
+        }.distinct()
+    }
+
+    private fun List<String>.normalizedEndpointAddrs(): List<String> {
+        return map(String::trim).filter(String::isNotBlank).distinct()
     }
 
     private fun Map<String, List<Int>>.toTransportPortsJson(): JSONObject {
