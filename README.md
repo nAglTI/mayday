@@ -19,6 +19,7 @@ The app is designed for people who need a compact connection client with a moder
 - Expandable advanced diagnostics for protocol, speed, endpoint, and technical details.
 - Split tunneling with app selection.
 - Dedicated split tunneling screen for managing selected apps.
+- Installed app risk check for spyware, surveillance, and connection-monitoring behavior on the device.
 - Quick Settings tile for connecting and disconnecting from the Android system shade.
 - Foreground notification with connection status and connection actions.
 - English and Russian interface text.
@@ -37,6 +38,15 @@ Raw profile files and manual YAML import are not part of the user-facing flow. I
 - Onboarding: first setup with key import, clipboard import, or skip.
 - Settings: app preferences, key import, connection settings, and advanced options.
 - Split tunneling: app selection for protected connection usage.
+- App check: installed app scan with risk levels and evidence.
+
+App check screenshots:
+
+<p>
+  <img src="docs/assets/screenshots/android/semantic-main-en.jpg" alt="Installed app risk scan running" width="220">
+  <img src="docs/assets/screenshots/android/semantic-help-en.jpg" alt="How app risk analysis works" width="220">
+  <img src="docs/assets/screenshots/android/semantic-result-en.jpg" alt="Installed app risk evidence" width="220">
+</p>
 
 ## Android App Structure
 
