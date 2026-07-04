@@ -68,4 +68,4 @@ This README is limited to the Android application experience and high-level proj
 
 Release notes are stored in [docs/release-notes](docs/release-notes).
 
-The current release notes are available here: [mayday 2.1.1](docs/release-notes/2.1.1.md).
+The current release notes are available here: [mayday 2.1.4](docs/release-notes/2.1.4.md).

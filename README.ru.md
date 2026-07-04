@@ -69,4 +69,4 @@ mayday теперь использует импорт через ключ. По�
 
 Release notes хранятся в [docs/release-notes](docs/release-notes).
 
-Текущие release notes доступны здесь: [mayday 2.1.1](docs/release-notes/2.1.1.md).
+Текущие release notes доступны здесь: [mayday 2.1.4](docs/release-notes/2.1.4.md).

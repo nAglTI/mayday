@@ -66,12 +66,13 @@ class AarBackedVpnCoreBridge @Inject constructor() : VpnCoreBridge {
                     }
                 }
 
+                val shouldRestartVpn = runner != null && runnerConfigJson == request.configJson
                 val activeRunner = ensureRunner(
                     configJson = request.configJson,
                     protector = nativeProtector,
                     statusHandler = nativeStatusHandler,
                 )
-                if (vpnAttached) {
+                if (shouldRestartVpn || vpnAttached) {
                     activeRunner.restartVPN(
                         request.tunFileDescriptor.toLong(),
                         nativeReconfigurator,
