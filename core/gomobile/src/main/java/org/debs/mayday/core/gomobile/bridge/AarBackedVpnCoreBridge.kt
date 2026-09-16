@@ -1,210 +1,194 @@
 package org.debs.mayday.core.gomobile.bridge
 
+import android.os.ParcelFileDescriptor
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import vpncore.Runner
 import vpncore.Vpncore
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/** Lifecycle and update calls are serialized by the VPN service, outside native callbacks. */
 @Singleton
 class AarBackedVpnCoreBridge @Inject constructor() : VpnCoreBridge {
-    @Volatile
-    private var runner: Runner? = null
-    @Volatile
-    private var runnerConfigJson: String? = null
-    @Volatile
-    private var vpnAttached: Boolean = false
-    private val linkError: Throwable?
+    @Volatile private var runner: Runner? = null
+    @Volatile private var runnerConfigJson: String? = null
+    @Volatile private var vpnAttached = false
+    @Volatile private var currentStatusHandler: StatusHandler? = null
 
     override val isLinked: Boolean
     override val linkErrorMessage: String?
+    override val coreVersion: String?
 
     init {
-        val initResult = runCatching {
+        val result = runCatching {
             Vpncore.touch()
+            Vpncore.version()
         }
-        isLinked = initResult.isSuccess
-        linkError = initResult.exceptionOrNull()
-        linkErrorMessage = linkError?.toDiagnosticMessage()
-        if (linkError != null) {
-            Log.e(TAG, "Bootstrap failed.")
-        }
+        isLinked = result.isSuccess
+        coreVersion = result.getOrNull()
+        linkErrorMessage = result.exceptionOrNull()?.toDiagnosticMessage()
+        if (result.isFailure) Log.e(TAG, "Bootstrap failed.")
     }
 
-    override suspend fun start(request: VpnCoreLaunchRequest): Result<Unit> {
-        return withContext(Dispatchers.IO) {
-            runCatching {
-                check(isLinked) {
-                    linkErrorMessage ?: "vpncore.aar is present but could not be initialized."
-                }
-                val nativeProtector = object : vpncore.SocketProtector {
-                    override fun protect(fd: Long): Boolean {
-                        return request.socketProtector.protect(fd.toInt())
-                    }
-                }
-                val nativeStatusHandler = object : vpncore.StatusHandler {
-                    override fun onStatus(statusJSON: String) {
-                        request.statusHandler.onStatus(statusJSON)
-                    }
-                }
-                val nativeReconfigurator = object : vpncore.TunReconfigurator {
-                    override fun reconfigure(assignedIP: String, maskBits: Long) {
-                        request.tunReconfigurator.reconfigure(assignedIP, maskBits)
-                    }
-                }
-                val nativeResolver = request.packageResolver?.let { resolver ->
-                    object : vpncore.PackageResolver {
-                        override fun resolveOwner(
-                            proto: String,
-                            local: String,
-                            remote: String,
-                        ): String {
-                            return resolver.resolveOwner(proto, local, remote)
-                        }
-                    }
-                }
-
-                val shouldRestartVpn = runner != null && runnerConfigJson == request.configJson
-                val activeRunner = ensureRunner(
-                    configJson = request.configJson,
-                    protector = nativeProtector,
-                    statusHandler = nativeStatusHandler,
+    override suspend fun start(request: VpnCoreLaunchRequest): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            withOwnedDescriptor(request.tunFileDescriptor) { accept ->
+                checkLinked()
+                check(!vpnAttached) { "VPN is already attached; use a configuration update." }
+                currentStatusHandler = request.statusHandler
+                val activeRunner = ensureRunner(request)
+                // Initialized Runner, nonnegative fd and serialized start avoid all early
+                // rejection cases. After entering startVPN the native core owns this fd.
+                accept()
+                activeRunner.startVPN(
+                    request.tunFileDescriptor.toLong(),
+                    request.tunReconfigurator.toNative(),
+                    request.packageResolver.toNative()
                 )
-                if (shouldRestartVpn || vpnAttached) {
-                    activeRunner.restartVPN(
-                        request.tunFileDescriptor.toLong(),
-                        nativeReconfigurator,
-                        nativeResolver,
-                    )
-                } else {
-                    activeRunner.startVPN(
-                        request.tunFileDescriptor.toLong(),
-                        nativeReconfigurator,
-                        nativeResolver,
-                    )
-                }
                 vpnAttached = true
-                Unit
-            }.onFailure {
-                Log.e(TAG, "Start request failed.")
+            }.onFailure { Log.e(TAG, "Start request failed.") }
+        }
+
+    private fun ensureRunner(request: VpnCoreLaunchRequest): Runner {
+        runner?.let { existing ->
+            if (runnerConfigJson != request.configJson) {
+                existing.updateConfig(request.configJson)
+                runnerConfigJson = request.configJson
             }
+            return existing
+        }
+        val protector = object : vpncore.SocketProtector {
+            override fun protect(fd: Long) = request.socketProtector.protect(fd.toInt())
+        }
+        val status = object : vpncore.StatusHandler {
+            override fun onStatus(statusJSON: String) {
+                currentStatusHandler?.onStatus(statusJSON)
+            }
+        }
+        return checkNotNull(Vpncore.startRunner(request.configJson, protector, status)) {
+            "Vpncore.startRunner returned null runner."
+        }.also {
+            runner = it
+            runnerConfigJson = request.configJson
         }
     }
 
-    private fun ensureRunner(
-        configJson: String,
-        protector: vpncore.SocketProtector,
-        statusHandler: vpncore.StatusHandler,
-    ): Runner {
-        val existingRunner = runner
-        if (existingRunner != null && runnerConfigJson == configJson) {
-            return existingRunner
-        }
-
-        if (existingRunner != null) {
-            runCatching {
-                existingRunner.shutdown()
-            }.onFailure {
-                Log.e(TAG, "Runner replacement shutdown failed.")
-            }
-            runner = null
-            runnerConfigJson = null
-            vpnAttached = false
-        }
-
-        val newRunner = Vpncore.startRunner(configJson, protector, statusHandler)
-        runner = checkNotNull(newRunner) { "Vpncore.startRunner returned null runner." }
-        runnerConfigJson = configJson
-        vpnAttached = false
-        return runner as Runner
+    override fun supportedTransportsJson(): Result<String> = runCatching {
+        checkLinked()
+        Vpncore.supportedTransportsJSON()
     }
 
-    override fun supportedTransportsJson(): Result<String> {
-        return runCatching {
-            check(isLinked) {
-                linkErrorMessage ?: "vpncore.aar is present but could not be initialized."
-            }
-            Vpncore.supportedTransportsJSON()
-        }.onFailure {
-            Log.e(TAG, "Transport catalog request failed.")
+    override fun recommendedMtu(configJson: String): Result<Int> = runCatching {
+        checkLinked()
+        val mtu = Vpncore.recommendedMTU(configJson)
+        check(mtu in 100L..1500L) { "The core returned an invalid tunnel MTU." }
+        mtu.toInt()
+    }
+
+    override fun statusJson(): Result<String> = runCatching {
+        requireRunner().statusJSON().also { json ->
+            val active = runCatching { JSONObject(json).opt("vpn_active") }.getOrNull()
+            if (active is Boolean) vpnAttached = active
         }
     }
 
-    override fun statusJson(): Result<String> {
-        return runCatching {
-            val activeRunner = checkNotNull(runner) {
-                "vpncore runner is not active, cannot read status."
-            }
-            activeRunner.statusJSON()
-        }.onFailure {
-            Log.e(TAG, "Status request failed.")
+    override fun configUpdateNeedsTun(configJson: String): Result<Boolean> = runCatching {
+        runner?.configUpdateNeedsTun(configJson) ?: run {
+            recommendedMtu(configJson).getOrThrow()
+            false
         }
     }
+
+    override fun updateConfig(configJson: String): Result<Unit> = runCatching {
+        val activeRunner = runner
+        if (activeRunner == null) {
+            recommendedMtu(configJson).getOrThrow()
+        } else {
+            activeRunner.updateConfig(configJson)
+            runnerConfigJson = configJson
+        }
+        Unit
+    }
+
+    override fun updateSettings(settingsJson: String): Result<Unit> = runCatching {
+        requireRunner().updateSettings(settingsJson)
+        // Next full-profile start must explicitly reconcile the stored profile.
+        runnerConfigJson = null
+    }
+
+    override fun updateConfigAndTun(request: VpnCoreUpdateRequest): Result<Unit> =
+        withOwnedDescriptor(request.tunFileDescriptor) { accept ->
+            val activeRunner = requireRunner()
+            check(vpnAttached) { "VPN must be active for a TUN configuration update." }
+            accept()
+            activeRunner.updateConfigAndTun(
+                request.configJson,
+                request.tunFileDescriptor.toLong(),
+                request.tunReconfigurator.toNative(),
+                request.packageResolver.toNative()
+            )
+            runnerConfigJson = request.configJson
+        }
+
+    override fun swapTun(tunFileDescriptor: Int): Result<Unit> =
+        withOwnedDescriptor(tunFileDescriptor) { accept ->
+            val activeRunner = requireRunner()
+            check(vpnAttached) { "VPN must be active to replace its TUN." }
+            accept()
+            activeRunner.swapTun(tunFileDescriptor.toLong())
+        }
 
     override fun onPackageChanged(packageName: String) {
-        if (packageName.isBlank()) {
-            return
-        }
-        val activeRunner = runner ?: return
-        runCatching {
-            activeRunner.onPackageChanged(packageName)
-        }.onFailure {
-            Log.e(TAG, "Package change dispatch failed.")
-        }
+        if (packageName.isNotBlank()) runCatching { runner?.onPackageChanged(packageName) }
     }
 
     override fun onNetworkChange() {
-        val activeRunner = runner ?: return
-        runCatching {
-            activeRunner.onNetworkChange()
-        }.onFailure {
-            Log.e(TAG, "Network change dispatch failed.")
-        }
-    }
-
-    override fun swapTun(tunFileDescriptor: Int): Result<Unit> {
-        return runCatching {
-            val activeRunner = checkNotNull(runner) {
-                "vpncore runner is not active, cannot swap TUN."
-            }
-            activeRunner.swapTun(tunFileDescriptor.toLong())
-        }.onFailure {
-            Log.e(TAG, "Refresh request failed.")
-        }
+        runCatching { runner?.onNetworkChange() }
     }
 
     override fun stop() {
-        val activeRunner = runner ?: return
-        runCatching {
-            activeRunner.stop()
-            vpnAttached = false
-        }.onFailure {
-            Log.e(TAG, "Stop request failed.")
-        }
+        runner?.stop()
+        vpnAttached = false
     }
 
     override fun shutdown() {
-        val activeRunner = runner ?: return
+        currentStatusHandler = null
+        val previous = runner
         runner = null
         runnerConfigJson = null
         vpnAttached = false
-        runCatching {
-            activeRunner.shutdown()
-        }.onFailure {
-            Log.e(TAG, "Shutdown request failed.")
+        previous?.shutdown()
+    }
+
+    private fun requireRunner(): Runner = checkNotNull(runner) { "VPN runner is not initialized." }
+
+    private fun checkLinked() {
+        check(isLinked) { linkErrorMessage ?: "vpncore.aar could not be initialized." }
+    }
+
+    /** Close only before native acceptance. Native errors after acceptance already close fd. */
+    private fun withOwnedDescriptor(fd: Int, block: (accept: () -> Unit) -> Unit): Result<Unit> =
+        transferTunDescriptor(fd, { ParcelFileDescriptor.adoptFd(it).close() }, block)
+
+    private fun TunReconfigurator.toNative() = object : vpncore.TunReconfigurator {
+        override fun reconfigure(assignedIP: String, maskBits: Long) =
+            this@toNative.reconfigure(assignedIP, maskBits)
+    }
+
+    private fun PackageResolver?.toNative(): vpncore.PackageResolver? = this?.let { resolver ->
+        object : vpncore.PackageResolver {
+            override fun resolveOwner(proto: String, local: String, remote: String): String =
+                resolver.resolveOwner(proto, local, remote)
         }
     }
 
     private fun Throwable.toDiagnosticMessage(): String {
         val root = generateSequence(this) { it.cause }.last()
-        val detail = root.message?.takeIf(String::isNotBlank)
-        return if (detail == null) {
-            root::class.java.simpleName
-        } else {
-            "${root::class.java.simpleName}: $detail"
-        }
+        return listOfNotNull(root::class.java.simpleName, root.message?.takeIf(String::isNotBlank))
+            .joinToString(": ")
     }
 
     private companion object {

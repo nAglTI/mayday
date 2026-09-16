@@ -4,6 +4,7 @@ import org.debs.mayday.core.model.AppDensity
 import org.debs.mayday.core.model.AppLanguage
 import org.debs.mayday.core.model.AppThemeMode
 import org.debs.mayday.core.model.NetworkRescueProfile
+import org.debs.mayday.core.model.PacketPaddingMode
 import org.debs.mayday.core.model.SplitTunnelMode
 import org.debs.mayday.core.model.UiPreferences
 import org.debs.mayday.core.model.VpnMetricsConfig
@@ -27,8 +28,10 @@ data class SettingsUiState(
     val disableIpv6: Boolean = false,
     val packetFragmentPayloadBytes: String = "0",
     val disablePacketBatching: Boolean = false,
+    val packetPaddingMode: PacketPaddingMode = PacketPaddingMode.OFF,
     val packetPaddingMinBytes: String = "0",
     val packetPaddingMaxBytes: String = "0",
+    val lastValidPacketPaddingRange: Pair<Int, Int> = 0 to 0,
     val metrics: VpnMetricsConfig = VpnMetricsConfig(),
     val autoReconnect: Boolean = true,
     val splitTunnelMode: SplitTunnelMode = SplitTunnelMode.DISABLED,
@@ -42,25 +45,4 @@ data class SettingsUiState(
     val themeMode: AppThemeMode get() = uiPreferences.themeMode
     val language: AppLanguage get() = uiPreferences.language
     val density: AppDensity get() = uiPreferences.density
-}
-
-data class TransportModeOption(
-    val mode: VpnTransportMode,
-    val label: String,
-)
-
-fun defaultTransportModeOptions(): List<TransportModeOption> {
-    return listOf(
-        VpnTransportMode.AUTO,
-        VpnTransportMode.UTP,
-        VpnTransportMode.WS,
-        VpnTransportMode.HTTPS,
-        VpnTransportMode.TCP,
-        VpnTransportMode.RAW_UDP,
-    ).map { mode ->
-        TransportModeOption(
-            mode = mode,
-            label = mode.runtimeId,
-        )
-    }
 }

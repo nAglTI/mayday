@@ -51,7 +51,7 @@ class VpnProfileCompatibilityValidatorTest {
     }
 
     @Test
-    fun rawUdpTransportUsesRawUdpTransportPorts() {
+    fun savedRawUdpV1IsUnsupportedEvenWithItsOwnPorts() {
         val issue = VpnProfileCompatibilityValidator.firstIssue(
             validProfile(
                 relayKey = "",
@@ -59,7 +59,53 @@ class VpnProfileCompatibilityValidatorTest {
             ),
         )
 
-        assertNull(issue)
+        assertEquals(VpnProfileCompatibilityIssueType.UNSUPPORTED_TRANSPORT, issue?.type)
+    }
+
+    @Test
+    fun savedLegacyAliasesRemainUnsupportedWithoutMigratingToAutoOrV2() {
+        listOf("udp", "rawudp", "udp-raw", "raw-udp").forEach { alias ->
+            val mode = VpnTransportMode.fromWireValue(alias)
+            assertEquals(VpnTransportMode.RAW_UDP, mode)
+            assertEquals(
+                VpnProfileCompatibilityIssueType.UNSUPPORTED_TRANSPORT,
+                VpnProfileCompatibilityValidator.firstIssue(validProfile(transportMode = mode))?.type
+            )
+        }
+    }
+
+    @Test
+    fun automaticModesDoNotTreatLegacyRawOrUnknownPortsAsUsable() {
+        listOf(VpnTransportMode.AUTO, VpnTransportMode.AUTO_LOW_CPU).forEach { mode ->
+            listOf("udp", "rawudp", "udp-raw", "raw-udp", "future-carrier", "auto").forEach { id ->
+                assertEquals(
+                    "$mode / $id",
+                    VpnProfileCompatibilityIssueType.MISSING_RELAY_TRANSPORT_PORTS,
+                    VpnProfileCompatibilityValidator.firstIssue(
+                        validProfile(transportMode = mode, transportPorts = mapOf(id to listOf(52038)))
+                    )?.type
+                )
+            }
+        }
+    }
+
+    @Test
+    fun rawV2RequiresItsExactPortAndRelayKey() {
+        val mode = VpnTransportMode.RAW_UDP_V2
+        val ports = mapOf("raw-udp-v2" to listOf(52039))
+        assertEquals(
+            VpnProfileCompatibilityIssueType.MISSING_RELAY_TRANSPORT_PORTS,
+            VpnProfileCompatibilityValidator.firstIssue(
+                validProfile(transportMode = mode, transportPorts = mapOf("raw-udp" to listOf(52038)))
+            )?.type
+        )
+        assertEquals(
+            VpnProfileCompatibilityIssueType.MISSING_RELAY_KEY_FOR_CURRENT_CORE,
+            VpnProfileCompatibilityValidator.firstIssue(
+                validProfile(transportMode = mode, transportPorts = ports, relayKey = "")
+            )?.type
+        )
+        assertNull(VpnProfileCompatibilityValidator.firstIssue(validProfile(transportMode = mode, transportPorts = ports)))
     }
 
     @Test

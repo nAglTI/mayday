@@ -76,11 +76,13 @@ class VpnConfigImportParserTest {
     }
 
     @Test
-    fun parsesRawUdpTransportMode() {
-        val profile = parser.parse(importKey(validYamlConfig().replace("mode: auto", "mode: raw-udp")))
-
-        assertEquals(VpnTransportMode.RAW_UDP, profile.transportMode)
-        assertEquals(1280, profile.mtu)
+    fun rejectsRemovedRawUdpV1AliasesInYamlWithoutAutoFallback() {
+        listOf("udp", "rawudp", "udp-raw", "raw-udp").forEach { alias ->
+            val error = assertThrows(IllegalArgumentException::class.java) {
+                parser.parse(importKey(validYamlConfig().replace("mode: auto", "mode: $alias")))
+            }
+            assertTrue(error.message.orEmpty().contains("removed in core 2.1.2"))
+        }
     }
 
     @Test

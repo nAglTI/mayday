@@ -1,10 +1,10 @@
 package org.debs.mayday.core.gomobile.bridge
 
 import org.debs.mayday.core.model.SplitTunnelMode
-import org.debs.mayday.core.model.VpnMetricsConfig
 import org.debs.mayday.core.model.VpnProfile
 import org.debs.mayday.core.model.VpnProfileCompatibilityValidator
 import org.debs.mayday.core.model.VpnRelayTarget
+import org.debs.mayday.core.model.VpnTransportMode
 import org.json.JSONArray
 import org.json.JSONObject
 import javax.inject.Inject
@@ -23,15 +23,17 @@ class VpnCoreConfigEncoder @Inject constructor() {
             "Saved VPN config is not compatible with the current core. Please get a new import key."
         }
 
-        val root = profile.preservedConfigJson
+        val preservedRoot = profile.preservedConfigJson
             .takeIf(String::isNotBlank)
             ?.let { raw -> runCatching { JSONObject(raw) }.getOrNull() }
             ?: JSONObject()
 
-        root.remove("relay")
-        root.remove("relays")
+        // Core 2.1.2 rejects unknown fields. Project a fresh payload while the app
+        // retains the complete imported JSON for storage/export and future migrations.
+        val root = preservedRoot.clientProfileFields()
         val preservedRelays = root.optJSONArray("discovery_relays")
         val preservedTransport = root.optJSONObject("transport")
+        val preservedNetworkRescue = root.optJSONObject("network_rescue")
         root
             .put("config_version", SUPPORTED_CONFIG_VERSION)
             .put("user_id", userId)
@@ -39,14 +41,14 @@ class VpnCoreConfigEncoder @Inject constructor() {
             .put("prestart_full_probe", profile.prestartFullProbe)
             .put("steady_state_quick_probe_enabled", profile.steadyStateQuickProbeEnabled)
             .put("steady_state_benchmark_enabled", profile.steadyStateBenchmarkEnabled)
-            .put("network_rescue", buildNetworkRescue(profile))
+            .put("network_rescue", buildNetworkRescue(profile, preservedNetworkRescue))
             .put("disable_ipv6", profile.disableIpv6)
             .put("tunnel_mtu", normalizeTunnelMtu(profile))
             .put("packet_fragment_payload_bytes", normalizePacketFragmentPayloadBytes(profile))
             .put("disable_packet_batching", profile.disablePacketBatching)
+            .put("packet_padding_mode", profile.packetPaddingMode.wireValue)
             .put("packet_padding_min_bytes", normalizePacketPaddingMinBytes(profile))
             .put("packet_padding_max_bytes", normalizePacketPaddingMaxBytes(profile))
-            .put("metrics", buildClientMetrics(profile.metrics))
             .put("discovery_relays", buildRelaysArray(profile, preservedRelays))
             .put("transport", buildTransport(profile, preservedTransport))
             .put("servers", buildServersArray(profile))
@@ -65,7 +67,8 @@ class VpnCoreConfigEncoder @Inject constructor() {
             require(addr.isNotBlank()) { "Relay address is required." }
             val relayKey = relay.relayKey.trim()
             val endpointAddrs = relay.endpointAddrs.normalizedEndpointAddrs()
-            val relayJson = preservedRelays.findPreservedRelay(index, relay) ?: JSONObject()
+            val relayJson = (preservedRelays.findPreservedRelay(index, relay) ?: JSONObject())
+                .onlyFields("id", "addr", "endpoint_addrs", "short_id", "ports", "transport_ports", "relay_key")
             if (endpointAddrs.isNotEmpty()) {
                 relayJson.put("endpoint_addrs", JSONArray(endpointAddrs))
             }
@@ -89,8 +92,12 @@ class VpnCoreConfigEncoder @Inject constructor() {
         profile: VpnProfile,
         preservedTransport: JSONObject?,
     ): JSONObject {
-        val transport = preservedTransport?.let { JSONObject(it.toString()) } ?: JSONObject()
-        return transport.put("mode", profile.transportMode.wireValue)
+        val transport = (preservedTransport ?: JSONObject())
+            .onlyFields("mode", "tls", "ws", "first_flight_split")
+            .projectObject("tls", "client_hello")
+            .projectObject("ws", "random_path")
+            .projectObject("first_flight_split", "enabled", "min_bytes", "max_bytes", "delay_min_ms", "delay_max_ms")
+        return transport.put("mode", profile.transportMode.runtimeId)
     }
 
     private fun buildServersArray(profile: VpnProfile): JSONArray {
@@ -105,7 +112,7 @@ class VpnCoreConfigEncoder @Inject constructor() {
                 JSONObject()
                     .put("id", server.id.trim())
                     .put("key", server.key.trim())
-                    .put("priority", server.priority.coerceAtLeast(1)),
+                    .put("priority", server.priority),
             )
         }
         return array
@@ -113,11 +120,10 @@ class VpnCoreConfigEncoder @Inject constructor() {
 
     private fun buildSplitTunnel(profile: VpnProfile): JSONObject {
         val enabled = profile.splitTunnelMode != SplitTunnelMode.DISABLED
-        val existing = profile.preservedConfigJson
+        val existing = (profile.preservedConfigJson
             .takeIf(String::isNotBlank)
             ?.let { raw -> runCatching { JSONObject(raw).optJSONObject("split_tunnel") }.getOrNull() }
-            ?: JSONObject()
-        existing.remove("mode")
+            ?: JSONObject()).onlyFields("enabled", "apps_mode", "apps_win", "apps_android")
         if (!existing.has("apps_win")) {
             existing.put("apps_win", JSONArray(emptyList<String>()))
         }
@@ -136,18 +142,18 @@ class VpnCoreConfigEncoder @Inject constructor() {
             )
     }
 
-    private fun buildNetworkRescue(profile: VpnProfile): JSONObject {
+    private fun buildNetworkRescue(
+        profile: VpnProfile,
+        preservedNetworkRescue: JSONObject?
+    ): JSONObject {
         return JSONObject()
             .put("enabled", profile.networkRescueProfile.isEnabled)
             .put("profile", profile.networkRescueProfile.wireValue)
-    }
-
-    private fun buildClientMetrics(metrics: VpnMetricsConfig): JSONObject {
-        return JSONObject()
-            .put("enabled", metrics.enabled)
-            .put("window_seconds", metrics.windowSeconds.coerceAtLeast(1))
-            .put("file_enabled", false)
-            .put("file_dir", "")
+            .put(
+                "adaptive_pacing",
+                profile.networkRescueProfile.isEnabled &&
+                    preservedNetworkRescue?.optBoolean("adaptive_pacing", false) == true
+            )
     }
 
     private fun SplitTunnelMode.toWireValue(): String = when (this) {
@@ -161,7 +167,7 @@ class VpnCoreConfigEncoder @Inject constructor() {
         forEach { (protocolId, ports) ->
             val normalizedProtocolId = protocolId.trim().lowercase()
             val normalizedPorts = ports.filter { it in 1..65535 }.distinct()
-            if (normalizedProtocolId.isNotBlank() && normalizedPorts.isNotEmpty()) {
+            if (normalizedProtocolId in SUPPORTED_CARRIER_IDS && normalizedPorts.isNotEmpty()) {
                 json.put(normalizedProtocolId, JSONArray(normalizedPorts))
             }
         }
@@ -245,8 +251,54 @@ class VpnCoreConfigEncoder @Inject constructor() {
         return profile.packetPaddingMinBytes < profile.packetPaddingMaxBytes
     }
 
+    private fun JSONObject.clientProfileFields(): JSONObject {
+        return onlyFields(
+            "config_version", "discovery_relays", "discovery_envelopes", "transport",
+            "outbound_proxy", "probe", "network_rescue", "server_failback_delay_sec", "user_id",
+            "prestart_full_probe", "steady_state_quick_probe_enabled", "steady_state_benchmark_enabled",
+            "disable_ipv6", "tunnel_mtu", "packet_fragment_payload_bytes", "disable_packet_batching",
+            "packet_padding_mode", "packet_padding_min_bytes", "packet_padding_max_bytes", "servers", "split_tunnel"
+        )
+            .projectObject("outbound_proxy", "enabled", "url")
+            .projectObject(
+                "probe", "health_bytes", "health_timeout_ms", "health_concurrency",
+                "speed_quick_bytes", "speed_bytes", "speed_timeout_ms"
+            )
+            .apply {
+                optJSONArray("discovery_envelopes")?.let { envelopes ->
+                    put("discovery_envelopes", JSONArray().apply {
+                        for (index in 0 until envelopes.length()) {
+                            val value = envelopes.get(index)
+                            put(if (value is JSONObject) {
+                                value.onlyFields(
+                                    "version", "from", "key_id", "issued_at_unix", "expires_at_unix", "nonce", "ciphertext"
+                                )
+                            } else value)
+                        }
+                    })
+                }
+            }
+    }
+
+    private fun JSONObject.onlyFields(vararg names: String): JSONObject {
+        return JSONObject().also { result ->
+            names.forEach { name ->
+                if (has(name)) result.put(name, get(name))
+            }
+        }
+    }
+
+    private fun JSONObject.projectObject(name: String, vararg fields: String): JSONObject {
+        optJSONObject(name)?.let { put(name, it.onlyFields(*fields)) }
+        return this
+    }
+
     private companion object {
         const val SUPPORTED_CONFIG_VERSION = 1
         val SERVER_KEY_PATTERN = Regex("^[0-9a-fA-F]{64}$")
+        val SUPPORTED_CARRIER_IDS = VpnTransportMode.entries
+            .filter { it.isSupported && !it.isAutomatic }
+            .map { it.runtimeId }
+            .toSet()
     }
 }

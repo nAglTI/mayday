@@ -61,6 +61,7 @@ class DefaultVpnProfileRepository @Inject constructor(
             disableIpv6 = disableIpv6,
             packetFragmentPayloadBytes = preferences[PACKET_FRAGMENT_PAYLOAD_BYTES] ?: 0,
             disablePacketBatching = preferences[DISABLE_PACKET_BATCHING] ?: false,
+            packetPaddingMode = readPacketPaddingMode(preferences),
             packetPaddingMinBytes = preferences[PACKET_PADDING_MIN_BYTES] ?: 0,
             packetPaddingMaxBytes = preferences[PACKET_PADDING_MAX_BYTES] ?: 0,
             metrics = readMetrics(preferences),
@@ -114,6 +115,7 @@ class DefaultVpnProfileRepository @Inject constructor(
             preferences[DISABLE_IPV6] = profile.disableIpv6
             preferences[PACKET_FRAGMENT_PAYLOAD_BYTES] = profile.packetFragmentPayloadBytes
             preferences[DISABLE_PACKET_BATCHING] = profile.disablePacketBatching
+            preferences[PACKET_PADDING_MODE] = profile.packetPaddingMode.wireValue
             preferences[PACKET_PADDING_MIN_BYTES] = profile.packetPaddingMinBytes.coerceIn(0, 1200)
             preferences[PACKET_PADDING_MAX_BYTES] = profile.packetPaddingMaxBytes.coerceIn(0, 1200)
             preferences[METRICS_JSON] = encodeMetrics(profile.metrics)
@@ -154,6 +156,7 @@ class DefaultVpnProfileRepository @Inject constructor(
         val DISABLE_IPV6 = booleanPreferencesKey("disable_ipv6")
         val PACKET_FRAGMENT_PAYLOAD_BYTES = intPreferencesKey("packet_fragment_payload_bytes")
         val DISABLE_PACKET_BATCHING = booleanPreferencesKey("disable_packet_batching")
+        val PACKET_PADDING_MODE = stringPreferencesKey("packet_padding_mode")
         val PACKET_PADDING_MIN_BYTES = intPreferencesKey("packet_padding_min_bytes")
         val PACKET_PADDING_MAX_BYTES = intPreferencesKey("packet_padding_max_bytes")
         val METRICS_JSON = stringPreferencesKey("metrics_json")
@@ -208,7 +211,7 @@ class DefaultVpnProfileRepository @Inject constructor(
                         VpnServerTarget(
                             id = item.optString("id"),
                             key = item.optString("key"),
-                            priority = item.optInt("priority", 1),
+                            priority = item.optInt("priority", 0),
                         ),
                     )
                 }
@@ -302,7 +305,7 @@ class DefaultVpnProfileRepository @Inject constructor(
                 JSONObject()
                     .put("id", server.id.trim())
                     .put("key", server.key.trim())
-                    .put("priority", server.priority.coerceAtLeast(1)),
+                    .put("priority", server.priority),
             )
         }
         return array.toString()

@@ -3,6 +3,9 @@ package org.debs.mayday.core.model
 object VpnProfileCompatibilityValidator {
 
     fun firstIssue(profile: VpnProfile): VpnProfileCompatibilityIssue? {
+        if (!profile.transportMode.isSupported) {
+            return VpnProfileCompatibilityIssue(VpnProfileCompatibilityIssueType.UNSUPPORTED_TRANSPORT)
+        }
         if (profile.relays.isEmpty()) {
             return VpnProfileCompatibilityIssue(VpnProfileCompatibilityIssueType.MISSING_RELAY)
         }
@@ -72,7 +75,9 @@ object VpnProfileCompatibilityValidator {
     }
 
     private fun VpnProfile.requiresSealedDiscovery(): Boolean {
-        return transportMode == VpnTransportMode.AUTO || transportMode == VpnTransportMode.WS
+        return transportMode.isAutomatic ||
+            transportMode == VpnTransportMode.WS ||
+            transportMode == VpnTransportMode.RAW_UDP_V2
     }
 
     private fun VpnProfile.isTunnelMtuValid(): Boolean {
@@ -95,11 +100,12 @@ object VpnProfileCompatibilityValidator {
 
     private fun VpnRelayTarget.hasUsableTransportPorts(transportMode: VpnTransportMode): Boolean {
         val validTransportPorts = transportPorts
-            .filterKeys(String::isNotBlank)
+            .filterKeys { it in SUPPORTED_CARRIER_IDS }
             .mapValues { (_, ports) -> ports.filter { it in 1..65535 }.distinct() }
             .filterValues(List<Int>::isNotEmpty)
         return when (transportMode) {
-            VpnTransportMode.AUTO -> validTransportPorts.isNotEmpty()
+            VpnTransportMode.AUTO,
+            VpnTransportMode.AUTO_LOW_CPU -> validTransportPorts.isNotEmpty()
             else -> validTransportPorts[transportMode.runtimeId].orEmpty().isNotEmpty()
         }
     }
@@ -109,6 +115,10 @@ object VpnProfileCompatibilityValidator {
     }
 
     private val HEX_64_PATTERN = Regex("^[0-9a-fA-F]{64}$")
+    private val SUPPORTED_CARRIER_IDS = VpnTransportMode.entries
+        .filter { it.isSupported && !it.isAutomatic }
+        .map { it.runtimeId }
+        .toSet()
 }
 
 data class VpnProfileCompatibilityIssue(
@@ -118,6 +128,7 @@ data class VpnProfileCompatibilityIssue(
 )
 
 enum class VpnProfileCompatibilityIssueType {
+    UNSUPPORTED_TRANSPORT,
     MISSING_RELAY,
     INVALID_USER_ID,
     MISSING_SERVER,

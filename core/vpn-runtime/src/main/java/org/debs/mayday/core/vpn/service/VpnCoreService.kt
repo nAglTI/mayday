@@ -15,7 +15,6 @@ import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.Handler
-import android.os.HandlerThread
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.util.Log
@@ -23,25 +22,29 @@ import androidx.core.app.ServiceCompat
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.debs.mayday.core.data.repository.VpnProfileRepository
+import org.debs.mayday.core.data.repository.TunnelAccessLogRepository
 import org.debs.mayday.core.gomobile.bridge.VpnCoreBridge
 import org.debs.mayday.core.gomobile.bridge.VpnCoreConfigEncoder
 import org.debs.mayday.core.gomobile.bridge.VpnCoreLaunchRequest
+import org.debs.mayday.core.gomobile.bridge.VpnCoreUpdateRequest
 import org.debs.mayday.core.model.SplitTunnelMode
 import org.debs.mayday.core.model.VpnConnectionStatus
 import org.debs.mayday.core.model.VpnProfile
 import org.debs.mayday.core.model.VpnRuntimeState
 import org.debs.mayday.core.vpn.controller.VpnConnectionStateStore
+import org.debs.mayday.core.vpn.controller.VpnProfileUpdateCoordinator
 import org.debs.mayday.core.vpn.notification.VpnNotificationFactory
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 
 @SuppressLint("VpnServicePolicy")
@@ -53,19 +56,16 @@ class VpnCoreService : VpnService() {
     @Inject lateinit var configEncoder: VpnCoreConfigEncoder
     @Inject lateinit var notificationFactory: VpnNotificationFactory
     @Inject lateinit var stateStore: VpnConnectionStateStore
+    @Inject lateinit var tunnelAccessLogRepository: TunnelAccessLogRepository
+    @Inject lateinit var profileUpdates: VpnProfileUpdateCoordinator
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
-    private val lifecycleMutex = Mutex()
+    private val lifecycleMutex get() = profileUpdates.lifecycleMutex
     private val connectivityManager: ConnectivityManager by lazy {
         getSystemService(ConnectivityManager::class.java)
     }
-    private val packageResolver by lazy {
-        AndroidPackageResolver(
-            connectivityManager = connectivityManager,
-            packageManager = packageManager,
-        )
-    }
+    @Volatile private var packageResolver: AndroidPackageResolver? = null
     private val packageBroadcastReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val packageName = intent?.data?.schemeSpecificPart?.trim().orEmpty()
@@ -87,8 +87,6 @@ class VpnCoreService : VpnService() {
         }
     }
 
-    private var reconfigThread: HandlerThread? = null
-    private var reconfigHandler: Handler? = null
     private var isPackageReceiverRegistered = false
     private var isNetworkCallbackRegistered = false
     @Volatile private var activeProfile: VpnProfile? = null
@@ -96,13 +94,20 @@ class VpnCoreService : VpnService() {
     @Volatile private var isStarting = false
     @Volatile private var isVpnActive = false
     @Volatile private var isStopRequested = false
-    @Volatile private var assignedIp: String? = null
-    @Volatile private var pendingAssignedIp: String? = null
+    @Volatile private var isDestroyed = false
+    private var runnerOwnershipEstablished = false
+    private val generationCounter = AtomicLong()
+    private val commandGeneration = AtomicLong()
+    @Volatile private var sessionGeneration = 0L
+    @Volatile private var tunGeneration = 0L
+    private val statusGeneration = AtomicLong()
+    private var assignedAddresses: List<TunnelAddress> = emptyList()
     @Volatile private var transportLabels: Map<String, String> = emptyMap()
     private val endpointTelemetryCache = mutableMapOf<EndpointDiagnosticKey, EndpointTelemetry>()
 
     override fun onCreate() {
         super.onCreate()
+        profileUpdates.attach(this, ::updateProfileLocked)
         registerPackageReceiver()
         registerNetworkCallback()
     }
@@ -126,6 +131,7 @@ class VpnCoreService : VpnService() {
     }
 
     private fun startVpn() {
+        val command = commandGeneration.incrementAndGet()
         notificationFactory.ensureChannel()
         ServiceCompat.startForeground(
             this,
@@ -136,19 +142,23 @@ class VpnCoreService : VpnService() {
 
         serviceScope.launch {
             lifecycleMutex.withLock {
+                if (command != commandGeneration.get()) return@withLock
                 if (isStarting || isVpnActive) {
                     Log.d(TAG, "Ignoring duplicate start request.")
                     return@withLock
                 }
 
                 val profile = profileRepository.profile.first()
-                ensureReconfigWorker()
+                if (isDestroyed || command != commandGeneration.get() || !profileUpdates.isOwner(this@VpnCoreService)) return@withLock
+                ensureRunnerOwnershipLocked()
                 clearEndpointTelemetryCache()
                 isStopRequested = false
                 isStarting = true
                 isVpnActive = false
-                assignedIp = null
-                pendingAssignedIp = null
+                assignedAddresses = emptyList()
+                tunGeneration = generationCounter.incrementAndGet()
+                sessionGeneration = generationCounter.incrementAndGet()
+                statusGeneration.incrementAndGet()
                 activeProfile = profile
                 currentProfileSummary = profile.endpointSummary()
                 startCoreLocked(profile)
@@ -161,210 +171,346 @@ class VpnCoreService : VpnService() {
             VpnRuntimeState(
                 status = VpnConnectionStatus.Starting,
                 headline = "Starting VPN core",
-                detail = "Starting discovery runner, warming up probes, and preparing TUN.",
+                detail = "Preparing the tunnel and waiting for the current exit handshake.",
                 engineAvailable = vpnCoreBridge.isLinked,
                 activeProfileSummary = profile.endpointSummary(),
-                engineDiagnostics = vpnCoreBridge.linkErrorMessage,
-            ),
-        )
-
-        if (!vpnCoreBridge.isLinked) {
-            isStarting = false
-            activeProfile = null
-            publishState(
-                VpnRuntimeState(
-                    status = VpnConnectionStatus.CoreMissing,
-                    headline = "VPN core missing",
-                    detail = vpnCoreBridge.linkErrorMessage
-                        ?: "The Android shell is ready, but vpncore.aar could not be initialized.",
-                    engineAvailable = false,
-                    activeProfileSummary = profile.endpointSummary(),
-                    engineDiagnostics = vpnCoreBridge.linkErrorMessage,
-                ),
+                engineDiagnostics = vpnCoreBridge.linkErrorMessage
             )
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            return
-        }
-
-        transportLabels = vpnCoreBridge.supportedTransportsJson()
-            .getOrNull()
-            .toTransportLabels()
-
-        val startupPayload = runCatching {
+        )
+        val generation = tunGeneration
+        val session = sessionGeneration
+        val result = runCatching {
+            check(vpnCoreBridge.isLinked) {
+                vpnCoreBridge.linkErrorMessage ?: "vpncore.aar could not be initialized."
+            }
             val configJson = configEncoder.encode(profile)
-            val tunFd = buildTun(
-                profile = profile,
-                ip = PLACEHOLDER_ADDRESS,
-                prefix = PLACEHOLDER_PREFIX,
-            ) ?: error("VpnService.Builder.establish() returned null.")
-            configJson to tunFd
+            // Validate the entire profile before establish can replace an existing Android VPN.
+            vpnCoreBridge.configUpdateNeedsTun(configJson).getOrThrow()
+            transportLabels = vpnCoreBridge.supportedTransportsJson().getOrNull().toTransportLabels()
+            val resolver = createPackageResolver(profile)
+            val builder = prepareTunBuilder(profile, assignedAddresses)
+            check(!isStopRequested && !isDestroyed) { "VPN start was cancelled." }
+            val fd = builder.establish()?.detachFd()
+                ?: error("VpnService.Builder.establish() returned null.")
+            packageResolver = resolver
+            vpnCoreBridge.start(
+                VpnCoreLaunchRequest(
+                    tunFileDescriptor = fd,
+                    configJson = configJson,
+                    socketProtector = { protect(it) },
+                    statusHandler = { if (session == sessionGeneration) onCoreStatus(it) },
+                    tunReconfigurator = { ip, prefix -> onAssignedIp(generation, ip, prefix) },
+                    packageResolver = resolver
+                )
+            ).getOrThrow()
         }
-
-        val payload = startupPayload.getOrElse { error ->
-            isStarting = false
-            activeProfile = null
-            publishState(
-                VpnRuntimeState(
-                    status = VpnConnectionStatus.Error,
-                    headline = "VPN configuration failed",
-                    detail = error.message ?: "Unable to build TUN or encode vpncore config.",
-                    engineAvailable = vpnCoreBridge.isLinked,
-                    activeProfileSummary = profile.endpointSummary(),
-                    engineDiagnostics = vpnCoreBridge.linkErrorMessage,
-                ),
-            )
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            return
-        }
-
-        val configJson = payload.first
-        val tunFd = payload.second
-
-        val result = vpnCoreBridge.start(
-            VpnCoreLaunchRequest(
-                tunFileDescriptor = tunFd,
-                configJson = configJson,
-                socketProtector = { socketFd -> protect(socketFd) },
-                statusHandler = ::onCoreStatus,
-                tunReconfigurator = { assignedIp, maskBits ->
-                    onAssignedIp(assignedIp, maskBits.toInt())
-                },
-                packageResolver = packageResolver.takeIf {
-                    profile.splitTunnelMode != SplitTunnelMode.DISABLED
-                }
-            ),
-        )
-
+        isStarting = false
         result.onSuccess {
-            if (isStopRequested) {
-                Log.d(TAG, "Late start completion ignored during shutdown.")
-                return@onSuccess
-            }
-
-            isStarting = false
             isVpnActive = true
-            publishState(
-                VpnRuntimeState(
-                    status = VpnConnectionStatus.Running,
-                    headline = "VPN core started",
-                    detail = "Runner attached the TUN after bootstrap warmup. Waiting for runtime status.",
-                    engineAvailable = true,
-                    activeProfileSummary = profile.endpointSummary(),
-                    engineDiagnostics = vpnCoreBridge.linkErrorMessage,
-                ),
-            )
+            // startVPN means TUN accepted. Only a fresh vpn_connected makes the UI Running.
         }.onFailure { error ->
-            runCatching {
-                ParcelFileDescriptor.adoptFd(tunFd).close()
-            }
-            isStarting = false
             isVpnActive = false
             activeProfile = null
-            publishState(
-                VpnRuntimeState(
-                    status = VpnConnectionStatus.Error,
-                    headline = "Failed to start gomobile core",
-                    detail = error.message ?: "Unknown gomobile bridge error.",
-                    engineAvailable = vpnCoreBridge.isLinked,
-                    activeProfileSummary = profile.endpointSummary(),
-                    engineDiagnostics = vpnCoreBridge.linkErrorMessage,
-                ),
-            )
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-        }
-    }
-
-    private fun buildTun(
-        profile: VpnProfile,
-        ip: String,
-        prefix: Int,
-    ): Int? {
-        val builder = Builder()
-            .setSession("mayday")
-            .setMtu(profile.mtu)
-            .addAddress(ip, prefix)
-            .applySplitTunnel(profile)
-
-        if (ip.contains(':')) {
-            builder.addRoute("::", 0)
-        } else {
-            builder.addRoute("0.0.0.0", 0)
-        }
-
-        profile.dnsServers.forEach { dns ->
-            if (dns.isNotBlank()) {
-                builder.addDnsServer(dns)
+            packageResolver = null
+            if (!isStopRequested && !isDestroyed) {
+                publishState(
+                    stateStore.state.value.copy(
+                        status = if (vpnCoreBridge.isLinked) VpnConnectionStatus.Error else VpnConnectionStatus.CoreMissing,
+                        headline = "Failed to start VPN core",
+                        detail = error.message ?: "Unable to start VPN."
+                    )
+                )
+                mainHandler.post {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
             }
         }
-
-        return builder.establish()?.detachFd()
     }
 
-    private fun onAssignedIp(ip: String, maskBits: Int) {
-        if (!isVpnActive || isStopRequested || ip.isBlank()) {
-            return
-        }
-        if (activeProfile?.disableIpv6 == true && ip.contains(':')) {
-            Log.d(TAG, "Ignoring IPv6 address refresh because disable_ipv6 is enabled.")
-            return
-        }
-        if (ip == assignedIp || ip == pendingAssignedIp) {
-            Log.d(TAG, "Ignoring duplicate address refresh.")
-            return
-        }
-
-        pendingAssignedIp = ip
-        publishState(
-            stateStore.state.value.copy(
-                status = VpnConnectionStatus.Running,
-                headline = "AssignedIP received",
-                detail = "AssignedIP $ip/$maskBits received from exit-server. Scheduling TUN hot-swap.",
-                engineAvailable = vpnCoreBridge.isLinked,
-                activeProfileSummary = currentProfileSummary,
-                engineDiagnostics = vpnCoreBridge.linkErrorMessage,
-            ),
+    private fun createPackageResolver(profile: VpnProfile): AndroidPackageResolver? {
+        if (profile.splitTunnelMode == SplitTunnelMode.DISABLED) return null
+        return AndroidPackageResolver(
+            connectivityManager = connectivityManager,
+            packageManager = packageManager,
+            observer = TunnelAccessObserver(
+                sessionId = UUID.randomUUID().toString(),
+                mode = profile.splitTunnelMode,
+                selectedPackages = profile.selectedPackages.toSet(),
+                ownPackageName = packageName,
+                record = tunnelAccessLogRepository::record,
+                isEnabled = { tunnelAccessLogRepository.enabled.value }
+            )
         )
+    }
 
-        val handler = ensureReconfigWorker()
-        if (!handler.post { doSwapTun(ip, maskBits) }) {
-            pendingAssignedIp = null
-            Log.e(TAG, "Refresh dispatch failed.")
+    private fun prepareTunBuilder(profile: VpnProfile, assigned: List<TunnelAddress>): Builder {
+        val effectiveMtu = vpnCoreBridge.recommendedMtu(configEncoder.encode(profile)).getOrThrow()
+        val addresses = tunnelAddresses(assigned, profile.disableIpv6)
+        val dnsServers = profile.dnsServers.map(String::trim).filter(String::isNotEmpty).distinct()
+        // Validate numeric DNS before Builder.establish() and don't enable the IPv6 family
+        // through an IPv6 DNS entry when the profile explicitly disables it.
+        val usableDns = dnsServers.map { TunnelAddress.parse(it, if (':' in it) 128 else 32) }
+            .filterNot { profile.disableIpv6 && it.isIpv6 }
+        require(usableDns.isNotEmpty()) { "At least one DNS address for an enabled IP family is required." }
+        return Builder()
+            .setSession(profile.tunName.trim().ifEmpty { "mayday" })
+            .setMtu(effectiveMtu)
+            .apply {
+                addresses.forEach { addAddress(it.ip, it.prefix) }
+                addRoute("0.0.0.0", 0)
+                if (!profile.disableIpv6) addRoute("::", 0)
+                usableDns.forEach { addDnsServer(it.ip) }
+            }
+            .applySplitTunnel(profile)
+    }
+
+    /** Called only through the coordinator, while holding the lifecycle mutex on IO. */
+    private suspend fun updateProfileLocked(candidate: VpnProfile) {
+        check(!isDestroyed) { "VPN service is shutting down. Please retry after it stops." }
+        check(profileUpdates.isOwner(this)) { "VPN service was replaced. Please retry." }
+        ensureRunnerOwnershipLocked()
+        check(!isStopRequested || (!isVpnActive && !isStarting)) { "VPN is stopping. Please retry after it stops." }
+        val candidateJson = configEncoder.encode(candidate)
+        val nativeNeedsTun = vpnCoreBridge.configUpdateNeedsTun(candidateJson).getOrThrow()
+        val previous = activeProfile ?: profileRepository.profile.first()
+        if (!isVpnActive) {
+            vpnCoreBridge.updateConfig(candidateJson).getOrThrow()
+            profileRepository.save(candidate)
+            return
+        }
+        val previousJson = configEncoder.encode(previous)
+        val replaceTun = nativeNeedsTun || needsFrontendTunReplacement(previous, candidate)
+        val previousGeneration = tunGeneration
+        val previousResolver = packageResolver
+        val previousAddresses = assignedAddresses
+        val previousState = stateStore.state.value
+        val nextGeneration = if (replaceTun) generationCounter.incrementAndGet() else previousGeneration
+        // New native callbacks retain the candidate policy; old callbacks keep their own snapshot.
+        val nextResolver = if (replaceTun) createPackageResolver(candidate) else previousResolver
+        val builder = if (replaceTun) prepareTunBuilder(candidate, previousAddresses) else null
+        check(!isStopRequested && !isDestroyed) { "VPN configuration update was cancelled." }
+        var established = false
+        var committed = false
+        statusGeneration.incrementAndGet()
+        try {
+            if (builder != null) {
+                established = true
+                val fd = builder.establish()?.detachFd()
+                    ?: error("VpnService.Builder.establish() returned null.")
+                vpnCoreBridge.updateConfigAndTun(
+                    VpnCoreUpdateRequest(
+                        configJson = candidateJson,
+                        tunFileDescriptor = fd,
+                        tunReconfigurator = { ip, prefix -> onAssignedIp(nextGeneration, ip, prefix) },
+                        packageResolver = nextResolver
+                    )
+                ).getOrThrow()
+            } else {
+                vpnCoreBridge.updateConfig(candidateJson).getOrThrow()
+            }
+            committed = true
+            activeProfile = candidate
+            currentProfileSummary = candidate.endpointSummary()
+            tunGeneration = nextGeneration
+            packageResolver = nextResolver
+            assignedAddresses = previousAddresses.filterNot { candidate.disableIpv6 && it.isIpv6 }
+            profileRepository.save(candidate)
+            if (!isStopRequested && !isDestroyed) {
+                val base = previousState.copy(
+                    status = if (requiresFreshConnection(previousJson, candidateJson)) {
+                        VpnConnectionStatus.Starting
+                    } else previousState.status,
+                    headline = "VPN configuration applied",
+                    activeProfileSummary = currentProfileSummary
+                )
+                publishState(base)
+                // Read the current route, never use the previous connected state as confirmation.
+                vpnCoreBridge.statusJson().getOrNull()?.toRuntimeState()?.let(::publishState)
+            }
+        } catch (error: Throwable) {
+            statusGeneration.incrementAndGet()
+            tunGeneration = previousGeneration
+            packageResolver = previousResolver
+            activeProfile = previous
+            currentProfileSummary = previous.endpointSummary()
+            assignedAddresses = previousAddresses
+            val recoveryError = if ((established || committed) && !isStopRequested && !isDestroyed) {
+                runCatching {
+                    if (established) {
+                        // establish() may have already revoked Android's old interface even
+                        // when native validation/application failed before its commit.
+                        restoreTunnelLocked(previous, previousJson, previousGeneration, previousResolver, committed)
+                    } else {
+                        vpnCoreBridge.updateConfig(previousJson).getOrThrow()
+                    }
+                }.exceptionOrNull()
+            } else null
+            if (recoveryError != null) {
+                vpnCoreBridge.stop()
+                isVpnActive = false
+                activeProfile = null
+                publishState(previousState.copy(
+                    status = VpnConnectionStatus.Error,
+                    headline = "VPN configuration recovery failed",
+                    coreState = "failed",
+                    vpnState = "inactive",
+                    detail = recoveryError.message ?: "Unable to restore the previous Android VPN interface."
+                ))
+                throw IllegalStateException(
+                    "${error.message ?: "Configuration update failed"}. Previous tunnel could not be restored: ${recoveryError.message}",
+                    error
+                )
+            }
+            if (!isStopRequested && !isDestroyed) {
+                // A throwing native update can also have attempted its own rollback before
+                // returning. Never restore a captured connected state without a fresh read.
+                val recoveredState = vpnCoreBridge.statusJson().getOrNull()?.toRuntimeState()
+                publishState(recoveredState ?: previousState.copy(
+                    status = VpnConnectionStatus.Error,
+                    headline = "Unable to confirm VPN state after configuration failure",
+                    detail = error.message ?: "The current connection state is unavailable."
+                ))
+            }
+            throw error
+        }
+    }
+
+    private fun ensureRunnerOwnershipLocked() {
+        if (!runnerOwnershipEstablished) {
+            // A recreated Android Service must not reuse callbacks/protector of its old instance.
+            vpnCoreBridge.shutdown()
+            runnerOwnershipEstablished = true
+        }
+    }
+
+    private suspend fun restoreTunnelLocked(
+        profile: VpnProfile,
+        configJson: String,
+        generation: Long,
+        resolver: AndroidPackageResolver?,
+        revertNativeConfig: Boolean
+    ) {
+        if (isStopRequested || isDestroyed) return
+        val fd = prepareTunBuilder(profile, assignedAddresses).establish()?.detachFd()
+            ?: error("Unable to re-establish the previous Android VPN interface.")
+        if (isStopRequested || isDestroyed) {
+            // This recovery fd has not been handed to native code yet.
+            ParcelFileDescriptor.adoptFd(fd).close()
+            return
+        }
+        val nativeActive = vpnCoreBridge.statusJson().getOrNull()?.let {
+            runCatching { JSONObject(it).optBoolean("vpn_active", isVpnActive) }.getOrNull()
+        } ?: isVpnActive
+        if (nativeActive) {
+            if (revertNativeConfig) {
+                vpnCoreBridge.updateConfigAndTun(VpnCoreUpdateRequest(
+                    configJson = configJson,
+                    tunFileDescriptor = fd,
+                    tunReconfigurator = { ip, prefix -> onAssignedIp(generation, ip, prefix) },
+                    packageResolver = resolver
+                )).getOrThrow()
+            } else {
+                vpnCoreBridge.swapTun(fd).getOrThrow()
+            }
+        } else {
+            // Native update may have failed while recovering its engine. Reinitialize the
+            // stopped attachment explicitly; startVPN is the documented stop -> start path.
+            vpnCoreBridge.stop()
+            val session = sessionGeneration
+            vpnCoreBridge.start(VpnCoreLaunchRequest(
+                tunFileDescriptor = fd,
+                configJson = configJson,
+                socketProtector = { protect(it) },
+                statusHandler = { if (session == sessionGeneration) onCoreStatus(it) },
+                tunReconfigurator = { ip, prefix -> onAssignedIp(generation, ip, prefix) },
+                packageResolver = resolver
+            )).getOrThrow()
+            isVpnActive = true
+        }
+    }
+
+    private fun onAssignedIp(generation: Long, ip: String, prefix: Long) {
+        // Never synchronously call a lifecycle/update API or wait for the service mutex
+        // on the Go callback thread. This also keeps callbacks delivered during start/update.
+        val configGeneration = statusGeneration.get()
+        serviceScope.launch {
+            lifecycleMutex.withLock {
+                if (generation != tunGeneration || configGeneration != statusGeneration.get() || isStopRequested || isDestroyed || !isVpnActive || !profileUpdates.isOwner(this@VpnCoreService)) return@withLock
+                val profile = activeProfile ?: return@withLock
+                val address = runCatching { TunnelAddress.parse(ip, prefix) }.getOrElse {
+                    Log.w(TAG, "Ignoring an invalid assigned tunnel address.")
+                    return@withLock
+                }
+                if (profile.disableIpv6 && address.isIpv6) return@withLock
+                if (address in tunnelAddresses(assignedAddresses, profile.disableIpv6)) return@withLock
+                val previousAddresses = assignedAddresses
+                val updated = assignedAddresses.withAssignment(address)
+                val result = runCatching {
+                    val fd = prepareTunBuilder(profile, updated).establish()?.detachFd()
+                        ?: error("Unable to establish the assigned tunnel address.")
+                    vpnCoreBridge.swapTun(fd).getOrThrow()
+                    assignedAddresses = updated
+                }
+                result.onFailure { error ->
+                    assignedAddresses = previousAddresses
+                    if (isStopRequested || isDestroyed) return@onFailure
+                    val recovered = runCatching {
+                        restoreTunnelLocked(profile, configEncoder.encode(profile), generation, packageResolver, false)
+                    }
+                    if (recovered.isFailure) {
+                        vpnCoreBridge.stop()
+                        isVpnActive = false
+                        activeProfile = null
+                        publishState(stateStore.state.value.copy(
+                            status = VpnConnectionStatus.Error,
+                            headline = "TUN address update failed",
+                            coreState = "failed",
+                            vpnState = "inactive",
+                            detail = error.message ?: "Unable to update or restore the tunnel address."
+                        ))
+                    }
+                }
+            }
         }
     }
 
     private fun onCoreStatus(statusJson: String) {
-        if (statusJson.isBlank()) {
-            return
-        }
-
-        mainHandler.post {
-            val runtimeState = statusJson.toRuntimeState() ?: return@post
-            if (isStopRequested && runtimeState.status != VpnConnectionStatus.Idle) {
-                return@post
+        if (statusJson.isBlank()) return
+        val generation = statusGeneration.get()
+        serviceScope.launch {
+            lifecycleMutex.withLock {
+                if (generation != statusGeneration.get() || isDestroyed || !profileUpdates.isOwner(this@VpnCoreService)) return@withLock
+                // A callback is a wakeup signal: an old engine may have emitted it just
+                // before update acquired its native lock. Read the current route after the
+                // frontend transaction, instead of replaying that captured vpn_connected.
+                val currentJson = vpnCoreBridge.statusJson().getOrNull() ?: return@withLock
+                val runtimeState = currentJson.toRuntimeState() ?: return@withLock
+                if (isStopRequested && runtimeState.status != VpnConnectionStatus.Idle) return@withLock
+                val state = if ((isStarting || isVpnActive) && runtimeState.status == VpnConnectionStatus.Idle) {
+                    runtimeState.copy(
+                        status = VpnConnectionStatus.Starting,
+                        headline = "VPN connecting"
+                    )
+                } else runtimeState
+                publishState(state)
             }
-            publishState(runtimeState.keepConnectingDuringBootstrap())
         }
     }
-
-    private fun VpnRuntimeState.keepConnectingDuringBootstrap(): VpnRuntimeState {
-        if (!isStarting || status != VpnConnectionStatus.Idle) {
-            return this
-        }
-
-        return copy(
-            status = VpnConnectionStatus.Starting,
-            headline = "Probing relays",
-            detail = detail.takeIf { it.isNotBlank() && it != "state vpn_inactive" }
-                ?: "Waiting for bootstrap probe results before attaching VPN.",
-        )
-    }
-
     private fun String.toRuntimeState(): VpnRuntimeState? {
         return runCatching {
             val json = JSONObject(this)
+            // All callers parse a status read under the lifecycle mutex. Reconcile an
+            // asynchronously failed/stopped native attachment so the next start is allowed.
+            val nativeActive = json.opt("vpn_active")
+            if (nativeActive is Boolean) {
+                if (isVpnActive && !nativeActive) {
+                    tunGeneration = generationCounter.incrementAndGet()
+                    activeProfile = null
+                    packageResolver = null
+                }
+                isVpnActive = nativeActive
+            }
             val state = json.optString("state").trim()
             val vpnState = json.optString("vpn_state").trim()
             val relayId = json.optString("active_relay_id").trim()
@@ -409,6 +555,7 @@ class VpnCoreService : VpnService() {
                 activeProfileSummary = currentProfileSummary,
                 engineDiagnostics = vpnCoreBridge.linkErrorMessage,
                 coreState = state,
+                coreVersion = json.optString("core_version").takeIf(String::isNotBlank),
                 vpnState = vpnState,
                 activeRelayId = relayId,
                 activeTransportId = transportId,
@@ -435,17 +582,7 @@ class VpnCoreService : VpnService() {
     }
 
     private fun String.toConnectionStatus(vpnState: String): VpnConnectionStatus {
-        val normalizedState = lowercase()
-        val normalizedVpnState = vpnState.lowercase()
-        return when {
-            normalizedState in FAILED_STATES -> VpnConnectionStatus.Error
-            normalizedState in CONNECTING_STATES -> VpnConnectionStatus.Starting
-            normalizedState in ACTIVE_STATES -> VpnConnectionStatus.Running
-            normalizedState in INACTIVE_STATES -> VpnConnectionStatus.Idle
-            normalizedVpnState == "active" -> VpnConnectionStatus.Running
-            normalizedVpnState == "inactive" -> VpnConnectionStatus.Idle
-            else -> stateStore.state.value.status
-        }
+        return confirmedConnectionStatus(lowercase(), vpnState.lowercase(), stateStore.state.value.status)
     }
 
     private fun VpnConnectionStatus.headlineFor(coreState: String): String {
@@ -701,108 +838,6 @@ class VpnCoreService : VpnService() {
         return if (this > 0.0) this else fallback()
     }
 
-    private fun doSwapTun(ip: String, maskBits: Int) {
-        var shouldStop = false
-        runBlocking {
-            lifecycleMutex.withLock {
-                if (!isVpnActive || isStopRequested) {
-                    pendingAssignedIp = null
-                    return@withLock
-                }
-
-                val profile = activeProfile ?: run {
-                    pendingAssignedIp = null
-                    return@withLock
-                }
-
-                Log.d(TAG, "Starting interface refresh.")
-                val newTunFd = runCatching {
-                    buildTun(
-                        profile = profile,
-                        ip = ip,
-                        prefix = SWAPPED_PREFIX,
-                    )
-                }.getOrElse { error ->
-                    pendingAssignedIp = null
-                    shouldStop = true
-                    publishState(
-                        VpnRuntimeState(
-                            status = VpnConnectionStatus.Error,
-                            headline = "TUN hot-swap failed",
-                            detail = error.message
-                                ?: "Unable to rebuild the interface for the refreshed address.",
-                            engineAvailable = vpnCoreBridge.isLinked,
-                            activeProfileSummary = currentProfileSummary,
-                            engineDiagnostics = vpnCoreBridge.linkErrorMessage,
-                        ),
-                    )
-                    return@withLock
-                } ?: run {
-                    pendingAssignedIp = null
-                    shouldStop = true
-                    publishState(
-                        VpnRuntimeState(
-                            status = VpnConnectionStatus.Error,
-                            headline = "TUN hot-swap failed",
-                            detail = "Second establish() returned null for AssignedIP $ip/$maskBits.",
-                            engineAvailable = vpnCoreBridge.isLinked,
-                            activeProfileSummary = currentProfileSummary,
-                            engineDiagnostics = vpnCoreBridge.linkErrorMessage,
-                        ),
-                    )
-                    return@withLock
-                }
-
-                vpnCoreBridge.swapTun(newTunFd)
-                    .onSuccess {
-                        if (isStopRequested) {
-                            pendingAssignedIp = null
-                            return@onSuccess
-                        }
-
-                        assignedIp = ip
-                        pendingAssignedIp = null
-                        publishState(
-                            VpnRuntimeState(
-                                status = VpnConnectionStatus.Running,
-                                headline = "VPN tunnel active",
-                                detail = "TUN hot-swapped to $ip/$SWAPPED_PREFIX. Relay session was preserved.",
-                                engineAvailable = vpnCoreBridge.isLinked,
-                                activeProfileSummary = currentProfileSummary,
-                                engineDiagnostics = vpnCoreBridge.linkErrorMessage,
-                            ),
-                        )
-                    }
-                    .onFailure { error ->
-                        pendingAssignedIp = null
-                        runCatching {
-                            ParcelFileDescriptor.adoptFd(newTunFd).close()
-                        }
-                        if (isStopRequested) {
-                            return@onFailure
-                        }
-
-                        shouldStop = true
-                        publishState(
-                            VpnRuntimeState(
-                                status = VpnConnectionStatus.Error,
-                                headline = "TUN hot-swap failed",
-                                detail = error.message
-                                    ?: "runner.swapTun() failed for AssignedIP $ip/$maskBits.",
-                                engineAvailable = vpnCoreBridge.isLinked,
-                                activeProfileSummary = currentProfileSummary,
-                                engineDiagnostics = vpnCoreBridge.linkErrorMessage,
-                            ),
-                        )
-                    }
-            }
-        }
-
-        if (shouldStop) {
-            stopVpn(removeNotification = true, shutdownCore = true)
-        }
-    }
-
     private fun Builder.applySplitTunnel(profile: VpnProfile): Builder {
         val splitMode = profile.splitTunnelMode
         val selectedPackages = profile.selectedPackages
@@ -876,13 +911,17 @@ class VpnCoreService : VpnService() {
     }
 
     private fun stopVpn(removeNotification: Boolean, shutdownCore: Boolean) {
-        if (isStopRequested) {
+        commandGeneration.incrementAndGet()
+        if (isStopRequested && !shutdownCore && !removeNotification) {
             Log.d(TAG, "Ignoring duplicate stop request.")
             return
         }
 
         Log.d(TAG, "Stopping active session.")
         isStopRequested = true
+        sessionGeneration = generationCounter.incrementAndGet()
+        tunGeneration = generationCounter.incrementAndGet()
+        statusGeneration.incrementAndGet()
         clearEndpointTelemetryCache()
         publishState(
             VpnRuntimeState(
@@ -896,7 +935,7 @@ class VpnCoreService : VpnService() {
         )
         serviceScope.launch {
             lifecycleMutex.withLock {
-                shutdownReconfigWorker()
+                if (!profileUpdates.isOwner(this@VpnCoreService)) return@withLock
                 val stopResult = runCatching {
                     vpnCoreBridge.stop()
                     if (shutdownCore) {
@@ -907,8 +946,8 @@ class VpnCoreService : VpnService() {
                 currentProfileSummary = ""
                 isStarting = false
                 isVpnActive = false
-                assignedIp = null
-                pendingAssignedIp = null
+                assignedAddresses = emptyList()
+                packageResolver = null
 
                 stopResult.onFailure {
                     Log.e(TAG, "Shutdown sequence failed.")
@@ -945,27 +984,8 @@ class VpnCoreService : VpnService() {
         }
     }
 
-    @Synchronized
-    private fun ensureReconfigWorker(): Handler {
-        reconfigHandler?.let { return it }
-
-        val thread = HandlerThread("vpn-reconfig").apply { start() }
-        val handler = Handler(thread.looper)
-        reconfigThread = thread
-        reconfigHandler = handler
-        return handler
-    }
-
-    @Synchronized
-    private fun shutdownReconfigWorker() {
-        reconfigHandler?.removeCallbacksAndMessages(null)
-        reconfigHandler = null
-        reconfigThread?.quitSafely()
-        reconfigThread = null
-    }
-
     private fun onPackageChanged(packageName: String) {
-        packageResolver.onPackageChanged(packageName)
+        packageResolver?.onPackageChanged(packageName)
         val profile = activeProfile ?: return
         if (profile.splitTunnelMode == SplitTunnelMode.DISABLED) {
             return
@@ -1074,11 +1094,26 @@ class VpnCoreService : VpnService() {
     }
 
     override fun onDestroy() {
-        shutdownReconfigWorker()
+        isDestroyed = true
+        isStopRequested = true
+        commandGeneration.incrementAndGet()
+        tunGeneration = generationCounter.incrementAndGet()
+        sessionGeneration = generationCounter.incrementAndGet()
+        statusGeneration.incrementAndGet()
         unregisterPackageReceiver()
         unregisterNetworkCallback()
-        vpnCoreBridge.shutdown()
-        serviceScope.cancel()
+        // onDestroy runs on main; cleanup queues behind any already accepted transaction.
+        serviceScope.launch(NonCancellable) {
+            lifecycleMutex.withLock {
+                if (profileUpdates.isOwner(this@VpnCoreService)) {
+                    runCatching { vpnCoreBridge.shutdown() }
+                    profileUpdates.detach(this@VpnCoreService)
+                }
+                isVpnActive = false
+                isStarting = false
+            }
+            serviceScope.cancel()
+        }
         super.onDestroy()
     }
 
@@ -1087,14 +1122,7 @@ class VpnCoreService : VpnService() {
         private const val ACTION_START = "org.debs.mayday.action.START_VPN"
         private const val ACTION_STOP = "org.debs.mayday.action.STOP_VPN"
         private const val ACTION_DISCONNECT = "org.debs.mayday.action.DISCONNECT_VPN"
-        private const val PLACEHOLDER_ADDRESS = "10.0.0.2"
-        private const val PLACEHOLDER_PREFIX = 32
-        private const val SWAPPED_PREFIX = 32
         private const val MAX_DIAGNOSTIC_ROWS = 4
-        private val CONNECTING_STATES = setOf("vpn_connect", "connect", "connecting", "starting")
-        private val ACTIVE_STATES = setOf("vpn_connected", "connected", "degraded", "running")
-        private val INACTIVE_STATES = setOf("vpn_inactive", "inactive", "idle", "stopped")
-        private val FAILED_STATES = setOf("failed", "error")
         private val DIAGNOSTIC_RETAIN_STATES = setOf(
             VpnConnectionStatus.Starting,
             VpnConnectionStatus.Running,

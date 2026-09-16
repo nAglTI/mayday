@@ -4,6 +4,7 @@ import org.debs.mayday.core.model.AppDensity
 import org.debs.mayday.core.model.AppLanguage
 import org.debs.mayday.core.model.AppThemeMode
 import org.debs.mayday.core.model.NetworkRescueProfile
+import org.debs.mayday.core.model.PacketPaddingMode
 import org.debs.mayday.core.model.VpnTransportMode
 
 sealed interface SettingsUiEvent {
@@ -29,6 +30,7 @@ sealed interface SettingsUiEvent {
     data class DisableIpv6Changed(val value: Boolean) : SettingsUiEvent
     data class PacketFragmentPayloadChanged(val value: String) : SettingsUiEvent
     data class DisablePacketBatchingChanged(val value: Boolean) : SettingsUiEvent
+    data class PacketPaddingModeChanged(val value: PacketPaddingMode) : SettingsUiEvent
     data class PacketPaddingMinChanged(val value: String) : SettingsUiEvent
     data class PacketPaddingMaxChanged(val value: String) : SettingsUiEvent
     data class AutoReconnectChanged(val value: Boolean) : SettingsUiEvent

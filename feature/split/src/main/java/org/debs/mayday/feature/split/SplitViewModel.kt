@@ -20,7 +20,6 @@ import org.debs.mayday.core.data.repository.VpnProfileRepository
 import org.debs.mayday.core.designsystem.theme.maydayStrings
 import org.debs.mayday.core.model.AppSemanticAnalysisResult
 import org.debs.mayday.core.model.SplitTunnelMode
-import org.debs.mayday.core.model.VpnConnectionStatus
 import org.debs.mayday.core.vpn.controller.VpnConnectionController
 import javax.inject.Inject
 
@@ -54,6 +53,7 @@ class SplitViewModel @Inject constructor(
     fun onEvent(event: SplitUiEvent) {
         when (event) {
             SplitUiEvent.BackClicked -> emitEffect(SplitUiEffect.NavigateBack)
+            SplitUiEvent.TunnelAccessClicked -> emitEffect(SplitUiEffect.NavigateToTunnelAccess)
             SplitUiEvent.RefreshRequested -> refresh()
             SplitUiEvent.SaveClicked -> save()
             SplitUiEvent.MessageShown -> update { copy(message = null) }
@@ -115,6 +115,8 @@ class SplitViewModel @Inject constructor(
     }
 
     private fun refresh() {
+        // Returning from the journal must keep the routing selection being edited.
+        if (uiState.value.hasUnsavedChanges) return
         val currentState = uiState.value
         mutableState.update { it.copy(isLoading = true) }
         viewModelScope.launch {
@@ -166,17 +168,12 @@ class SplitViewModel @Inject constructor(
                     error(strings().atLeastOneAppRequired)
                 }
                 val latestProfile = profileRepository.profile.first()
-                val wasRunning = connectionController.state.value.status == VpnConnectionStatus.Running
-                profileRepository.save(
+                connectionController.updateProfile(
                     latestProfile.copy(
                         splitTunnelMode = currentState.splitTunnelMode,
                         selectedPackages = selectedPackages,
                     ),
-                )
-                if (wasRunning) {
-                    connectionController.stop()
-                    connectionController.start()
-                }
+                ).getOrThrow()
                 SplitConfigSnapshot(
                     splitTunnelMode = currentState.splitTunnelMode,
                     selectedPackages = selectedPackages,

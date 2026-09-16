@@ -13,4 +13,5 @@
     <string name="mayday_vpn_tile_starting">подключение</string>
     <string name="mayday_vpn_tile_stopping">отключение</string>
     <string name="mayday_vpn_tile_unavailable">нужно разрешение</string>
+    <string name="mayday_vpn_tile_error_disconnect">ошибка · нажмите для отключения</string>
 </resources>

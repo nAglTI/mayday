@@ -10,6 +10,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import org.debs.mayday.core.model.VpnConnectionStatus
 import org.debs.mayday.core.model.VpnRuntimeState
 import org.debs.mayday.core.vpn.R
+import org.debs.mayday.core.vpn.controller.shouldDisconnect
 import org.debs.mayday.core.vpn.service.VpnCoreService
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -85,9 +86,9 @@ class VpnNotificationFactory @Inject constructor(
     }
 
     private fun actionFor(state: VpnRuntimeState): NotificationCompat.Action? {
-        return when (state.status) {
-            VpnConnectionStatus.Starting,
-            VpnConnectionStatus.Running -> NotificationCompat.Action.Builder(
+        return when {
+            state.status == VpnConnectionStatus.Stopping -> null
+            state.shouldDisconnect -> NotificationCompat.Action.Builder(
                 R.drawable.ic_mayday_disconnect,
                 context.getString(R.string.mayday_vpn_action_disconnect),
                 PendingIntent.getService(
@@ -97,9 +98,7 @@ class VpnNotificationFactory @Inject constructor(
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
                 ),
             ).build()
-            VpnConnectionStatus.Idle,
-            VpnConnectionStatus.CoreMissing,
-            VpnConnectionStatus.Error -> NotificationCompat.Action.Builder(
+            else -> NotificationCompat.Action.Builder(
                 R.drawable.ic_mayday_connect,
                 context.getString(R.string.mayday_vpn_action_connect),
                 PendingIntent.getForegroundService(
@@ -109,7 +108,6 @@ class VpnNotificationFactory @Inject constructor(
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
                 ),
             ).build()
-            VpnConnectionStatus.Stopping -> null
         }
     }
 

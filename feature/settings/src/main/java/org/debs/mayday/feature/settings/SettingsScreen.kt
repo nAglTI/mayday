@@ -27,12 +27,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.CallSplit
 import androidx.compose.material.icons.automirrored.outlined.FactCheck
 import androidx.compose.material.icons.outlined.AllInclusive
-import androidx.compose.material.icons.outlined.Analytics
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.HealthAndSafety
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.Public
-import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
@@ -94,6 +92,7 @@ import org.debs.mayday.core.model.AppDensity
 import org.debs.mayday.core.model.AppLanguage
 import org.debs.mayday.core.model.AppThemeMode
 import org.debs.mayday.core.model.NetworkRescueProfile
+import org.debs.mayday.core.model.PacketPaddingMode
 import org.debs.mayday.core.model.SplitTunnelMode
 import org.debs.mayday.core.model.UiPreferences
 import org.debs.mayday.core.model.VpnTransportMode
@@ -276,10 +275,25 @@ internal fun SettingsScreen(
                             label = strings.transport,
                             selected = state.transportMode,
                             items = transportChoices(strings, state.transportOptions),
+                            fallbackSelectedLabel = transportLabel(
+                                strings,
+                                TransportModeOption(state.transportMode, "")
+                            ),
                             onSelect = {
                                 onEvent(SettingsUiEvent.TransportModeChanged(it as VpnTransportMode))
                             },
                         )
+                        if (!state.transportMode.isSupported) {
+                            Text(
+                                text = if (strings.locale == AppLanguage.RU) {
+                                    "Raw UDP v1 удалён из ядра. Выберите поддерживаемый транспорт. Для Raw UDP v2 нужны отдельный порт и relay_key в профиле."
+                                } else {
+                                    "Raw UDP v1 was removed. Choose a supported transport. Raw UDP v2 requires its own port and relay_key in the profile."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
                         SettingsRescueModeRow(
                             copy = advancedSettingCopy(strings, AdvancedSettingCopyKey.NetworkRescue),
                             icon = Icons.Outlined.HealthAndSafety,
@@ -293,6 +307,15 @@ internal fun SettingsScreen(
                             label = strings.serverFailbackDelay,
                             value = state.serverFailbackDelaySec,
                             onValueChange = { onEvent(SettingsUiEvent.ServerFailbackDelayChanged(it)) },
+                        )
+                        Text(
+                            text = if (strings.locale == AppLanguage.RU) {
+                                "В текущем ядре работающий маршрут не меняется только из-за появления более приоритетного сервера. Чтобы применить новый порядок, измените его и нажмите «Сохранить»."
+                            } else {
+                                "The current core keeps a working route when a higher-priority server appears. To apply a new order, change it and tap Save."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         SettingsNumberSettingRow(
                             copy = advancedSettingCopy(strings, AdvancedSettingCopyKey.TunnelMtu),
@@ -319,18 +342,33 @@ internal fun SettingsScreen(
                             checked = state.disablePacketBatching,
                             onCheckedChange = { onEvent(SettingsUiEvent.DisablePacketBatchingChanged(it)) },
                         )
-                        SettingsNumberSettingRow(
-                            copy = advancedSettingCopy(strings, AdvancedSettingCopyKey.PacketPaddingMin),
-                            icon = Icons.Outlined.Tune,
-                            value = state.packetPaddingMinBytes,
-                            onValueChange = { onEvent(SettingsUiEvent.PacketPaddingMinChanged(it)) },
+                        SettingsPopupChoiceRow(
+                            label = if (strings.locale == AppLanguage.RU) "Padding пакетов" else "Packet padding",
+                            selected = state.packetPaddingMode,
+                            items = packetPaddingChoices(strings),
+                            onSelect = {
+                                onEvent(SettingsUiEvent.PacketPaddingModeChanged(it as PacketPaddingMode))
+                            }
                         )
-                        SettingsNumberSettingRow(
-                            copy = advancedSettingCopy(strings, AdvancedSettingCopyKey.PacketPaddingMax),
-                            icon = Icons.Outlined.Tune,
-                            value = state.packetPaddingMaxBytes,
-                            onValueChange = { onEvent(SettingsUiEvent.PacketPaddingMaxChanged(it)) },
+                        Text(
+                            text = packetPaddingHint(strings, state.packetPaddingMode),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        if (state.packetPaddingMode == PacketPaddingMode.CUSTOM_RANGE) {
+                            SettingsNumberSettingRow(
+                                copy = advancedSettingCopy(strings, AdvancedSettingCopyKey.PacketPaddingMin),
+                                icon = Icons.Outlined.Tune,
+                                value = state.packetPaddingMinBytes,
+                                onValueChange = { onEvent(SettingsUiEvent.PacketPaddingMinChanged(it)) }
+                            )
+                            SettingsNumberSettingRow(
+                                copy = advancedSettingCopy(strings, AdvancedSettingCopyKey.PacketPaddingMax),
+                                icon = Icons.Outlined.Tune,
+                                value = state.packetPaddingMaxBytes,
+                                onValueChange = { onEvent(SettingsUiEvent.PacketPaddingMaxChanged(it)) }
+                            )
+                        }
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         SettingSwitchRow(
                             copy = advancedSettingCopy(strings, AdvancedSettingCopyKey.PrestartFullProbe),
@@ -339,22 +377,10 @@ internal fun SettingsScreen(
                             onCheckedChange = { onEvent(SettingsUiEvent.PrestartFullProbeChanged(it)) },
                         )
                         SettingSwitchRow(
-                            copy = advancedSettingCopy(strings, AdvancedSettingCopyKey.SteadyStateQuickProbe),
-                            icon = Icons.Outlined.Speed,
-                            checked = state.steadyStateQuickProbeEnabled,
-                            onCheckedChange = { onEvent(SettingsUiEvent.SteadyStateQuickProbeChanged(it)) },
-                        )
-                        SettingSwitchRow(
                             copy = advancedSettingCopy(strings, AdvancedSettingCopyKey.SteadyStateBenchmark),
                             icon = Icons.Outlined.Sync,
                             checked = state.steadyStateBenchmarkEnabled,
                             onCheckedChange = { onEvent(SettingsUiEvent.SteadyStateBenchmarkChanged(it)) },
-                        )
-                        SettingSwitchRow(
-                            copy = advancedSettingCopy(strings, AdvancedSettingCopyKey.Metrics),
-                            icon = Icons.Outlined.Analytics,
-                            checked = state.metrics.enabled,
-                            onCheckedChange = { onEvent(SettingsUiEvent.MetricsEnabledChanged(it)) },
                         )
                         SettingsField(
                             label = strings.tun,
@@ -750,13 +776,14 @@ private fun SettingsPopupChoiceRow(
     selected: Any,
     items: List<Pair<Any, String>>,
     onSelect: (Any) -> Unit,
+    fallbackSelectedLabel: String = selected.toString(),
 ) {
     var expanded by rememberSaveable(label) { mutableStateOf(false) }
     var menuWidth by remember { mutableStateOf(0.dp) }
     val localDensity = LocalDensity.current
     val colors = MaterialTheme.colorScheme
     val selectedLabel = items.firstOrNull { it.first == selected }?.second
-        ?: selected.toString()
+        ?: fallbackSelectedLabel
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
@@ -1008,9 +1035,45 @@ private enum class AdvancedSettingCopyKey {
     PacketPaddingMin,
     PacketPaddingMax,
     PrestartFullProbe,
-    SteadyStateQuickProbe,
     SteadyStateBenchmark,
-    Metrics,
+}
+
+private fun packetPaddingChoices(strings: MaydayStrings): List<Pair<Any, String>> {
+    return if (strings.locale == AppLanguage.RU) {
+        listOf(
+            PacketPaddingMode.OFF to "Off — выключен",
+            PacketPaddingMode.MINIMAL to "Minimal — минимальный",
+            PacketPaddingMode.EXTREME to "Extreme — экстремальный",
+            PacketPaddingMode.CUSTOM_RANGE to "Custom range — свой диапазон"
+        )
+    } else {
+        listOf(
+            PacketPaddingMode.OFF to "Off",
+            PacketPaddingMode.MINIMAL to "Minimal",
+            PacketPaddingMode.EXTREME to "Extreme",
+            PacketPaddingMode.CUSTOM_RANGE to "Custom range"
+        )
+    }
+}
+
+private fun packetPaddingHint(strings: MaydayStrings, mode: PacketPaddingMode): String {
+    return if (strings.locale == AppLanguage.RU) {
+        val modeHint = when (mode) {
+            PacketPaddingMode.OFF -> "Без дополнительного padding. Служебное оформление транспорта сохраняется."
+            PacketPaddingMode.MINIMAL -> "0–64 случайных байта при наличии места, без дополнительного дробления ради padding."
+            PacketPaddingMode.EXTREME -> "0–768 случайных байт и дополнительное дробление. Больше трафика и нагрузки; скорость может снизиться."
+            PacketPaddingMode.CUSTOM_RANGE -> "Задайте диапазон 0–1200 байт в пределах бюджета пакета. 0/0 сохраняет прежний режим без собственного диапазона; для явного отключения выберите Off."
+        }
+        "$modeHint Не зависит от режима спасения сети. Сохранение применит настройки к активному VPN."
+    } else {
+        val modeHint = when (mode) {
+            PacketPaddingMode.OFF -> "No extra packet padding. Transport framing remains."
+            PacketPaddingMode.MINIMAL -> "0–64 random bytes when space is available, without extra fragmentation for padding."
+            PacketPaddingMode.EXTREME -> "0–768 random bytes and extra fragmentation. Uses more traffic and CPU; throughput may decrease."
+            PacketPaddingMode.CUSTOM_RANGE -> "Set a range within 0–1200 bytes and the packet budget. 0/0 keeps legacy behavior without a custom range; select Off to explicitly disable padding."
+        }
+        "$modeHint Independent of network rescue. Saving applies settings to the active VPN."
+    }
 }
 
 private data class AdvancedSettingCopy(
@@ -1026,11 +1089,11 @@ private fun advancedSettingCopy(
         AppLanguage.RU -> when (key) {
             AdvancedSettingCopyKey.NetworkRescue -> AdvancedSettingCopy(
                 title = "Режим спасения сети",
-                subtitle = "Обычный режим без fallback, стабильный для плохих каналов, экстренный включает Raw UDP.",
+                subtitle = "Выкл. для обычной сети, стабильный для плохих каналов, экстренный — для тяжёлых условий.",
             )
             AdvancedSettingCopyKey.TunnelMtu -> AdvancedSettingCopy(
                 title = "MTU туннеля",
-                subtitle = "Auto: 1280 для auto/UTP/Raw UDP, 1420 для TCP/WS/HTTPS. Максимум 1500.",
+                subtitle = "Auto: 1280 для auto/uTP/HTTPS REST/Raw UDP v2, 1420 для TCP/WS. Максимум 1500.",
             )
             AdvancedSettingCopyKey.DisableIpv6 -> AdvancedSettingCopy(
                 title = "Отключить IPv6",
@@ -1038,45 +1101,37 @@ private fun advancedSettingCopy(
             )
             AdvancedSettingCopyKey.PacketFragment -> AdvancedSettingCopy(
                 title = "Размер фрагмента пакета",
-                subtitle = "0 отключает дробление. Защитный диапазон: 64-65536 байт.",
+                subtitle = "0 — автоматическая политика. Явный размер: 64–65536 байт, независимо от MTU.",
             )
             AdvancedSettingCopyKey.DisablePacketBatching -> AdvancedSettingCopy(
                 title = "Отключить группировку пакетов",
                 subtitle = "Помогает вместе с малым фрагментом на нестабильных каналах.",
             )
             AdvancedSettingCopyKey.PacketPaddingMin -> AdvancedSettingCopy(
-                title = "\u041c\u0438\u043d\u0438\u043c\u0430\u043b\u044c\u043d\u044b\u0439 padding \u043f\u0430\u043a\u0435\u0442\u0430",
-                subtitle = "0 \u0432\u043c\u0435\u0441\u0442\u0435 \u0441 \u043c\u0430\u043a\u0441\u0438\u043c\u0443\u043c\u043e\u043c \u043e\u0442\u043a\u043b\u044e\u0447\u0430\u0435\u0442 padding. \u0414\u0438\u0430\u043f\u0430\u0437\u043e\u043d: 0-1200 \u0431\u0430\u0439\u0442.",
+                title = "Минимальный padding пакета",
+                subtitle = "Нижняя граница в байтах: 0–1200. Для явного отключения padding выберите Off.",
             )
             AdvancedSettingCopyKey.PacketPaddingMax -> AdvancedSettingCopy(
-                title = "\u041c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u044b\u0439 padding \u043f\u0430\u043a\u0435\u0442\u0430",
-                subtitle = "\u0414\u043e\u043b\u0436\u0435\u043d \u0431\u044b\u0442\u044c \u0431\u043e\u043b\u044c\u0448\u0435 \u043c\u0438\u043d\u0438\u043c\u0443\u043c\u0430. \u041f\u0440\u0435\u0441\u0435\u0442\u044b: 0/128 \u0438\u043b\u0438 24/256.",
+                title = "Максимальный padding пакета",
+                subtitle = "До 1200 байт. Должен быть больше минимума, кроме диапазона 0/0.",
             )
             AdvancedSettingCopyKey.PrestartFullProbe -> AdvancedSettingCopy(
                 title = "Полная проверка перед подключением",
                 subtitle = "VPN дождется полного теста маршрутов перед стартом туннеля.",
             )
-            AdvancedSettingCopyKey.SteadyStateQuickProbe -> AdvancedSettingCopy(
-                title = "Быстрая проверка в фоне",
-                subtitle = "Легко проверяет доступность серверов во время работы.",
-            )
             AdvancedSettingCopyKey.SteadyStateBenchmark -> AdvancedSettingCopy(
                 title = "Фоновый замер скорости",
                 subtitle = "Разрешает более тяжелую проверку качества канала.",
-            )
-            AdvancedSettingCopyKey.Metrics -> AdvancedSettingCopy(
-                title = "Метрики соединения",
-                subtitle = "Выключены по умолчанию. Включайте только для диагностики качества и производительности.",
             )
         }
         AppLanguage.EN -> when (key) {
             AdvancedSettingCopyKey.NetworkRescue -> AdvancedSettingCopy(
                 title = "Network rescue",
-                subtitle = "Off for normal networks, Stable for poor links, Extreme only for emergency UDP fallback.",
+                subtitle = "Off for normal networks, Stable for poor links, Extreme for difficult network conditions.",
             )
             AdvancedSettingCopyKey.TunnelMtu -> AdvancedSettingCopy(
                 title = "Tunnel MTU",
-                subtitle = "Auto: 1280 for auto/UTP/Raw UDP, 1420 for TCP/WS/HTTPS. Maximum 1500.",
+                subtitle = "Auto: 1280 for auto/uTP/HTTPS REST/Raw UDP v2, 1420 for TCP/WS. Maximum 1500.",
             )
             AdvancedSettingCopyKey.DisableIpv6 -> AdvancedSettingCopy(
                 title = "Disable IPv6",
@@ -1084,7 +1139,7 @@ private fun advancedSettingCopy(
             )
             AdvancedSettingCopyKey.PacketFragment -> AdvancedSettingCopy(
                 title = "Packet fragment size",
-                subtitle = "0 disables fragmentation. Protected range: 64-65536 bytes.",
+                subtitle = "0 uses automatic policy. Explicit size: 64–65536 bytes, independent of MTU.",
             )
             AdvancedSettingCopyKey.DisablePacketBatching -> AdvancedSettingCopy(
                 title = "Disable packet batching",
@@ -1092,27 +1147,19 @@ private fun advancedSettingCopy(
             )
             AdvancedSettingCopyKey.PacketPaddingMin -> AdvancedSettingCopy(
                 title = "Packet padding minimum",
-                subtitle = "0 with maximum 0 disables padding. Range: 0-1200 bytes.",
+                subtitle = "Lower bound in bytes. Range: 0–1200. Use Off to explicitly disable padding.",
             )
             AdvancedSettingCopyKey.PacketPaddingMax -> AdvancedSettingCopy(
                 title = "Packet padding maximum",
-                subtitle = "Must be greater than the minimum. Presets: 0/128 or 24/256.",
+                subtitle = "Up to 1200 bytes. Must exceed the minimum, except for the 0/0 range.",
             )
             AdvancedSettingCopyKey.PrestartFullProbe -> AdvancedSettingCopy(
                 title = "Full check before connecting",
                 subtitle = "Wait for a full route test before starting the tunnel.",
             )
-            AdvancedSettingCopyKey.SteadyStateQuickProbe -> AdvancedSettingCopy(
-                title = "Quick background check",
-                subtitle = "Lightly checks server availability while connected.",
-            )
             AdvancedSettingCopyKey.SteadyStateBenchmark -> AdvancedSettingCopy(
                 title = "Background speed benchmark",
                 subtitle = "Allows heavier channel quality checks in the background.",
-            )
-            AdvancedSettingCopyKey.Metrics -> AdvancedSettingCopy(
-                title = "Connection metrics",
-                subtitle = "Off by default. Enable only when diagnosing quality or performance.",
             )
         }
     }
@@ -1135,6 +1182,7 @@ private fun transportChoices(
     options: List<TransportModeOption>,
 ): List<Pair<Any, String>> {
     return options.ifEmpty { defaultTransportModeOptions() }
+        .filter { it.mode.isSupported }
         .map { option ->
             option.mode to transportLabel(strings, option)
         }
@@ -1171,11 +1219,20 @@ private fun transportLabel(
     val catalogLabel = option.label.trim()
     return when (option.mode) {
         VpnTransportMode.AUTO -> strings.auto
+        VpnTransportMode.AUTO_LOW_CPU -> when (strings.locale) {
+            AppLanguage.RU -> "Авто (low CPU)"
+            AppLanguage.EN -> "Auto (low CPU)"
+        }
         VpnTransportMode.TCP -> catalogLabel.ifBlank { strings.tcp }
         VpnTransportMode.UTP -> catalogLabel.ifBlank { strings.utp }
         VpnTransportMode.WS -> catalogLabel.ifBlank { "WebSocket" }
         VpnTransportMode.HTTPS -> catalogLabel.ifBlank { "HTTPS REST" }
-        VpnTransportMode.RAW_UDP -> catalogLabel.ifBlank { "Raw UDP" }
+        VpnTransportMode.RAW_UDP -> if (strings.locale == AppLanguage.RU) {
+            "Raw UDP v1 — больше не поддерживается"
+        } else {
+            "Raw UDP v1 — no longer supported"
+        }
+        VpnTransportMode.RAW_UDP_V2 -> catalogLabel.ifBlank { "Raw UDP v2" }
     }
 }
 
@@ -1271,8 +1328,10 @@ private fun previewSettingsState(
         transportMode = VpnTransportMode.AUTO,
         packetFragmentPayloadBytes = "100",
         disablePacketBatching = true,
+        packetPaddingMode = PacketPaddingMode.CUSTOM_RANGE,
         packetPaddingMinBytes = "0",
         packetPaddingMaxBytes = "128",
+        lastValidPacketPaddingRange = 0 to 128,
         autoReconnect = true,
         splitTunnelMode = SplitTunnelMode.ONLY_SELECTED,
         selectedPackageCount = 6,

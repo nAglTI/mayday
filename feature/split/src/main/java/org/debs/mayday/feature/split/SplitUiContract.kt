@@ -4,6 +4,7 @@ import org.debs.mayday.core.model.SplitTunnelMode
 
 sealed interface SplitUiEvent {
     data object BackClicked : SplitUiEvent
+    data object TunnelAccessClicked : SplitUiEvent
     data object RefreshRequested : SplitUiEvent
     data object SaveClicked : SplitUiEvent
     data object MessageShown : SplitUiEvent
@@ -19,4 +20,5 @@ sealed interface SplitUiEvent {
 
 sealed interface SplitUiEffect {
     data object NavigateBack : SplitUiEffect
+    data object NavigateToTunnelAccess : SplitUiEffect
 }

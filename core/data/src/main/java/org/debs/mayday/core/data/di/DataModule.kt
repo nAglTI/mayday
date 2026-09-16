@@ -16,16 +16,24 @@ import org.debs.mayday.core.data.packageinfo.DefaultSemanticAnalysisRepository
 import org.debs.mayday.core.data.packageinfo.InstalledAppsRepository
 import org.debs.mayday.core.data.packageinfo.SemanticAnalysisRepository
 import org.debs.mayday.core.data.repository.DefaultUiPreferencesRepository
+import org.debs.mayday.core.data.repository.DefaultTunnelAccessLogRepository
 import org.debs.mayday.core.data.repository.DefaultVpnProfileRepository
 import org.debs.mayday.core.data.repository.AppUpdateRepository
 import org.debs.mayday.core.data.repository.GitHubAppUpdateRepository
 import org.debs.mayday.core.data.repository.UiPreferencesRepository
+import org.debs.mayday.core.data.repository.TunnelAccessLogRepository
 import org.debs.mayday.core.data.repository.VpnProfileRepository
 import javax.inject.Singleton
 
 @Module
 @InstallIn(SingletonComponent::class)
 abstract class DataBindingsModule {
+
+    @Binds
+    @Singleton
+    abstract fun bindTunnelAccessLogRepository(
+        repository: DefaultTunnelAccessLogRepository
+    ): TunnelAccessLogRepository
 
     @Binds
     @Singleton

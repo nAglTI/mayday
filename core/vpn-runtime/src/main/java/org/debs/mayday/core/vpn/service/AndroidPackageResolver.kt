@@ -13,28 +13,35 @@ import java.util.concurrent.ConcurrentHashMap
 internal class AndroidPackageResolver(
     private val connectivityManager: ConnectivityManager,
     private val packageManager: PackageManager,
+    private val observer: TunnelAccessObserver? = null
 ) : PackageResolver {
 
     private val uidPackagesCache = ConcurrentHashMap<Int, String>()
 
     override fun resolveOwner(proto: String, local: String, remote: String): String {
-        val protocol = proto.toProtocolNumber() ?: return ""
-        val localAddress = local.toInetSocketAddress() ?: return ""
-        val remoteAddress = remote.toInetSocketAddress() ?: return ""
+        fun observed(uid: Int?, packages: String): String {
+            // An audit failure must not affect the native filter's owner resolution.
+            runCatching { observer?.onOwnerResolved(proto, local, remote, uid, packages) }
+            return packages
+        }
+
+        val protocol = proto.toProtocolNumber() ?: return observed(null, "")
+        val localAddress = local.toInetSocketAddress() ?: return observed(null, "")
+        val remoteAddress = remote.toInetSocketAddress() ?: return observed(null, "")
 
         val uid = runCatching {
             connectivityManager.getConnectionOwnerUid(protocol, localAddress, remoteAddress)
         }.getOrElse {
-            return ""
+            return observed(null, "")
         }
 
         if (uid == Process.INVALID_UID) {
-            return ""
+            return observed(null, "")
         }
 
-        uidPackagesCache[uid]?.let { return it }
+        uidPackagesCache[uid]?.let { return observed(uid, it) }
 
-        val packages = packageManager.getPackagesForUid(uid)
+        val packages = runCatching { packageManager.getPackagesForUid(uid) }.getOrNull()
             ?.asSequence()
             ?.map(String::trim)
             ?.filter(String::isNotBlank)
@@ -43,8 +50,11 @@ internal class AndroidPackageResolver(
             ?.joinToString(",")
             .orEmpty()
 
-        uidPackagesCache[uid] = packages
-        return packages
+        // Let the core's whitelist retry resolve a temporarily unknown owner again.
+        if (packages.isNotEmpty()) {
+            uidPackagesCache[uid] = packages
+        }
+        return observed(uid, packages)
     }
 
     fun onPackageChanged(packageName: String) {

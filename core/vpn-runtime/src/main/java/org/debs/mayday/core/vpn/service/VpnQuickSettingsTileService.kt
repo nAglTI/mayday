@@ -20,6 +20,7 @@ import org.debs.mayday.core.model.VpnConnectionStatus
 import org.debs.mayday.core.model.VpnRuntimeState
 import org.debs.mayday.core.vpn.R
 import org.debs.mayday.core.vpn.controller.VpnConnectionStateStore
+import org.debs.mayday.core.vpn.controller.shouldDisconnect
 import javax.inject.Inject
 
 @AndroidEntryPoint
@@ -48,15 +49,11 @@ class VpnQuickSettingsTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
-        when (stateStore.state.value.status) {
-            VpnConnectionStatus.Starting,
-            VpnConnectionStatus.Running -> startService(VpnCoreService.disconnectIntent(this))
-
-            VpnConnectionStatus.Stopping -> Unit
-
-            VpnConnectionStatus.Idle,
-            VpnConnectionStatus.CoreMissing,
-            VpnConnectionStatus.Error -> startVpnFromTile()
+        val current = stateStore.state.value
+        when {
+            current.status == VpnConnectionStatus.Stopping -> Unit
+            current.shouldDisconnect -> startService(VpnCoreService.disconnectIntent(this))
+            else -> startVpnFromTile()
         }
     }
 
@@ -105,8 +102,11 @@ class VpnQuickSettingsTileService : TileService() {
                 VpnConnectionStatus.Stopping -> getString(R.string.mayday_vpn_tile_stopping)
                 VpnConnectionStatus.CoreMissing -> getString(R.string.mayday_vpn_tile_unavailable)
 
-                VpnConnectionStatus.Idle,
-                VpnConnectionStatus.Error -> getString(R.string.mayday_vpn_tile_disconnected)
+                VpnConnectionStatus.Error -> getString(
+                    if (state.shouldDisconnect) R.string.mayday_vpn_tile_error_disconnect
+                    else R.string.mayday_vpn_tile_disconnected
+                )
+                VpnConnectionStatus.Idle -> getString(R.string.mayday_vpn_tile_disconnected)
             }
             updateTile()
         }

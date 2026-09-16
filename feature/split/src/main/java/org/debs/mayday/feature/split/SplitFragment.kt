@@ -1,6 +1,7 @@
 package org.debs.mayday.feature.split
 
 import android.os.Bundle
+import android.net.Uri
 import android.view.View
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -42,6 +43,9 @@ class SplitFragment : Fragment() {
                         viewModel.effect.collectLatest { effect ->
                             when (effect) {
                                 SplitUiEffect.NavigateBack -> findNavController().popBackStack()
+                                SplitUiEffect.NavigateToTunnelAccess -> findNavController().navigate(
+                                    Uri.parse("mayday://tunnel-access")
+                                )
                             }
                         }
                     }

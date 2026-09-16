@@ -6,6 +6,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.StateFlow
 import org.debs.mayday.core.model.VpnConnectionStatus
 import org.debs.mayday.core.model.VpnRuntimeState
+import org.debs.mayday.core.model.VpnProfile
 import org.debs.mayday.core.vpn.service.VpnCoreService
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -14,9 +15,13 @@ import javax.inject.Singleton
 class AndroidVpnConnectionController @Inject constructor(
     @param:ApplicationContext private val context: Context,
     private val stateStore: VpnConnectionStateStore,
+    private val profileUpdates: VpnProfileUpdateCoordinator,
 ) : VpnConnectionController {
 
     override val state: StateFlow<VpnRuntimeState> = stateStore.state
+
+    override suspend fun updateProfile(profile: VpnProfile): Result<Unit> =
+        profileUpdates.updateProfile(profile)
 
     override fun start() {
         stateStore.update {

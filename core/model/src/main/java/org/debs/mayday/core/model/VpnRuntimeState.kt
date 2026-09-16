@@ -7,6 +7,7 @@ data class VpnRuntimeState(
     val engineAvailable: Boolean = false,
     val activeProfileSummary: String = "",
     val engineDiagnostics: String? = null,
+    val coreVersion: String? = null,
     val coreState: String = "",
     val vpnState: String = "",
     val activeRelayId: String = "",

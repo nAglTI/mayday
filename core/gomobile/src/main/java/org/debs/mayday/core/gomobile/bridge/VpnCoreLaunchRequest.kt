@@ -9,6 +9,13 @@ data class VpnCoreLaunchRequest(
     val packageResolver: PackageResolver?
 )
 
+data class VpnCoreUpdateRequest(
+    val configJson: String,
+    val tunFileDescriptor: Int,
+    val tunReconfigurator: TunReconfigurator,
+    val packageResolver: PackageResolver?
+)
+
 fun interface SocketProtector {
     fun protect(socketFd: Int): Boolean
 }
