@@ -51,6 +51,7 @@ class HomeViewModel @Inject constructor(
             detail = runtime.detail,
             engineAvailable = runtime.engineAvailable,
             engineDiagnostics = runtime.engineDiagnostics,
+            coreVersion = runtime.coreVersion,
             coreState = runtime.coreState,
             vpnState = runtime.vpnState,
             activeRelayId = runtime.activeRelayId,

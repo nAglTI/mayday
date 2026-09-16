@@ -2,6 +2,7 @@ package org.debs.mayday.core.data.repository
 
 import org.debs.mayday.core.model.SplitTunnelMode
 import org.debs.mayday.core.model.NetworkRescueProfile
+import org.debs.mayday.core.model.PacketPaddingMode
 import org.debs.mayday.core.model.VpnMetricsConfig
 import org.debs.mayday.core.model.VpnProfile
 import org.debs.mayday.core.model.VpnProfileCompatibilityValidator
@@ -11,8 +12,13 @@ import org.debs.mayday.core.model.VpnTransportMode
 import org.json.JSONArray
 import org.json.JSONObject
 import org.yaml.snakeyaml.LoaderOptions
+import org.yaml.snakeyaml.DumperOptions
 import org.yaml.snakeyaml.Yaml
 import org.yaml.snakeyaml.constructor.SafeConstructor
+import org.yaml.snakeyaml.nodes.NodeId
+import org.yaml.snakeyaml.nodes.Tag
+import org.yaml.snakeyaml.representer.Representer
+import org.yaml.snakeyaml.resolver.Resolver
 import java.util.Base64
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -154,6 +160,10 @@ class VpnConfigImportParser @Inject constructor() {
                 json.opt("packet_fragment_payload_bytes"),
             ),
             disablePacketBatching = json.opt("disable_packet_batching").toBoolean(default = false),
+            packetPaddingMode = parsePacketPaddingMode(
+                rawMode = json.opt("packet_padding_mode"),
+                isPresent = json.has("packet_padding_mode")
+            ),
             packetPaddingMinBytes = normalizePacketPaddingBytes(json.opt("packet_padding_min_bytes")),
             packetPaddingMaxBytes = normalizePacketPaddingBytes(json.opt("packet_padding_max_bytes")),
             metrics = parseMetrics(json.optJSONObject("metrics")),
@@ -167,7 +177,12 @@ class VpnConfigImportParser @Inject constructor() {
         val yaml = Yaml(SafeConstructor(LoaderOptions())).load<Any?>(rawConfig)
         require(yaml is Map<*, *>) { "Import key must decode to a YAML or JSON config." }
         requireSupportedConfigVersion(yaml["config_version"])
-        val preservedConfigJson = yaml.toJsonObject().toString()
+        val packetPaddingMode = parseYamlPacketPaddingMode(rawConfig, yaml)
+        val preservedConfigJson = yaml.toJsonObject().apply {
+            if (yaml.containsKey("packet_padding_mode")) {
+                put("packet_padding_mode", packetPaddingMode.wireValue)
+            }
+        }.toString()
 
         val relays = JSONArray()
         (yaml["discovery_relays"] as? List<*>)?.forEachIndexed { index, item ->
@@ -203,7 +218,7 @@ class VpnConfigImportParser @Inject constructor() {
                     JSONObject()
                         .put("id", item["id"]?.toString().orEmpty())
                         .put("key", item["key"]?.toString().orEmpty())
-                        .put("priority", item["priority"].toIntOrNull(default = 1)),
+                        .put("priority", item["priority"].toIntOrNull(default = 0)),
                 )
             }
         }
@@ -241,6 +256,7 @@ class VpnConfigImportParser @Inject constructor() {
                 yaml["packet_fragment_payload_bytes"],
             ),
             disablePacketBatching = yaml["disable_packet_batching"].toBoolean(default = false),
+            packetPaddingMode = packetPaddingMode,
             packetPaddingMinBytes = normalizePacketPaddingBytes(yaml["packet_padding_min_bytes"]),
             packetPaddingMaxBytes = normalizePacketPaddingBytes(yaml["packet_padding_max_bytes"]),
             metrics = parseMetrics(yaml["metrics"] as? Map<*, *>),
@@ -266,6 +282,7 @@ class VpnConfigImportParser @Inject constructor() {
         disableIpv6: Boolean,
         packetFragmentPayloadBytes: Int,
         disablePacketBatching: Boolean,
+        packetPaddingMode: PacketPaddingMode,
         packetPaddingMinBytes: Int,
         packetPaddingMaxBytes: Int,
         metrics: VpnMetricsConfig,
@@ -297,7 +314,7 @@ class VpnConfigImportParser @Inject constructor() {
                     VpnServerTarget(
                         id = id,
                         key = key,
-                        priority = item.optInt("priority", 1),
+                        priority = item.optInt("priority", 0),
                     ),
                 )
             }
@@ -339,6 +356,7 @@ class VpnConfigImportParser @Inject constructor() {
             disableIpv6 = disableIpv6,
             packetFragmentPayloadBytes = packetFragmentPayloadBytes,
             disablePacketBatching = disablePacketBatching,
+            packetPaddingMode = packetPaddingMode,
             packetPaddingMinBytes = packetPaddingMinBytes,
             packetPaddingMaxBytes = packetPaddingMaxBytes,
             metrics = metrics,
@@ -449,8 +467,16 @@ class VpnConfigImportParser @Inject constructor() {
         if (mode.isBlank()) {
             return VpnTransportMode.AUTO
         }
-        return VpnTransportMode.fromRuntimeId(mode)
-            ?: throw IllegalArgumentException("transport.mode must be auto, tcp, utp, ws, https, rest, udp, or raw-udp.")
+        val transport = VpnTransportMode.fromRuntimeId(mode)
+            ?: throw IllegalArgumentException(
+                "transport.mode must be auto, auto-lowcpu, bt-tcp, bt-utp, ws, https-rest, or raw-udp-v2. " +
+                    "Aliases tcp, utp, https, and rest are also supported by the app."
+            )
+        require(transport.isSupported) {
+            "Raw UDP v1 ($mode) was removed in core 2.1.2. Ask your provider for a supported transport; " +
+                "Raw UDP v2 requires its own transport_ports and relay_key."
+        }
+        return transport
     }
 
     private fun normalizeServerFailbackDelay(rawDelay: Any?): Int {
@@ -466,7 +492,8 @@ class VpnConfigImportParser @Inject constructor() {
         transportMode: VpnTransportMode,
         disableIpv6: Boolean,
     ): Int {
-        val mtu = rawMtu.toIntOrNull(default = transportMode.defaultMtu())
+        val configuredMtu = rawMtu.toIntOrNull(default = transportMode.defaultMtu())
+        val mtu = if (configuredMtu == 0) transportMode.defaultMtu() else configuredMtu
         val minMtu = if (disableIpv6) 100 else 1280
         require(mtu in minMtu..1500) {
             "tunnel_mtu must be ${minMtu}..1500 for the current IPv6 mode."
@@ -480,6 +507,43 @@ class VpnConfigImportParser @Inject constructor() {
             "packet_fragment_payload_bytes must be 0 or a value from 64 to 65536."
         }
         return value
+    }
+
+    private fun parsePacketPaddingMode(rawMode: Any?, isPresent: Boolean): PacketPaddingMode {
+        if (!isPresent) {
+            return PacketPaddingMode.CUSTOM_RANGE
+        }
+        require(rawMode is String) { "packet_padding_mode must be a string." }
+        return PacketPaddingMode.fromWireValue(rawMode)
+            ?: throw IllegalArgumentException("packet_padding_mode must be off, minimal, extreme, or an empty string.")
+    }
+
+    private fun parseYamlPacketPaddingMode(rawConfig: String, yaml: Map<*, *>): PacketPaddingMode {
+        // YAML 1.1 treats unquoted off as false. Resolve only the root padding field differently;
+        // the original map retains ordinary boolean semantics for all other settings.
+        val rawMode = if (yaml["packet_padding_mode"] == false) {
+            val loaderOptions = LoaderOptions()
+            val dumperOptions = DumperOptions()
+            val modeYaml = Yaml(
+                SafeConstructor(loaderOptions),
+                Representer(dumperOptions),
+                dumperOptions,
+                loaderOptions,
+                object : Resolver() {
+                    override fun resolve(kind: NodeId, value: String?, implicit: Boolean): Tag {
+                        return if (kind == NodeId.scalar && implicit && value == "off") {
+                            Tag.STR
+                        } else {
+                            super.resolve(kind, value, implicit)
+                        }
+                    }
+                }
+            ).load<Map<*, *>>(rawConfig)
+            modeYaml["packet_padding_mode"]
+        } else {
+            yaml["packet_padding_mode"]
+        }
+        return parsePacketPaddingMode(rawMode, isPresent = yaml.containsKey("packet_padding_mode"))
     }
 
     private fun normalizePacketPaddingBytes(rawValue: Any?): Int {

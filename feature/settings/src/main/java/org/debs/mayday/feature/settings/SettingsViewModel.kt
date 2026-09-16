@@ -24,8 +24,8 @@ import org.debs.mayday.core.model.AppDensity
 import org.debs.mayday.core.model.AppLanguage
 import org.debs.mayday.core.model.AppThemeMode
 import org.debs.mayday.core.model.NetworkRescueProfile
+import org.debs.mayday.core.model.PacketPaddingMode
 import org.debs.mayday.core.model.UiPreferences
-import org.debs.mayday.core.model.VpnConnectionStatus
 import org.debs.mayday.core.model.VpnMetricsConfig
 import org.debs.mayday.core.model.VpnProfile
 import org.debs.mayday.core.model.VpnProfileCompatibilityValidator
@@ -33,8 +33,6 @@ import org.debs.mayday.core.model.VpnRelayTarget
 import org.debs.mayday.core.model.VpnServerTarget
 import org.debs.mayday.core.model.VpnTransportMode
 import org.debs.mayday.core.vpn.controller.VpnConnectionController
-import org.json.JSONArray
-import org.json.JSONObject
 import javax.inject.Inject
 
 @HiltViewModel
@@ -135,11 +133,14 @@ class SettingsViewModel @Inject constructor(
             is SettingsUiEvent.DisablePacketBatchingChanged -> update {
                 copy(disablePacketBatching = event.value, message = null)
             }
+            is SettingsUiEvent.PacketPaddingModeChanged -> update {
+                withPacketPaddingMode(event.value)
+            }
             is SettingsUiEvent.PacketPaddingMinChanged -> update {
-                copy(packetPaddingMinBytes = event.value, message = null)
+                withPacketPaddingRange(rawMin = event.value)
             }
             is SettingsUiEvent.PacketPaddingMaxChanged -> update {
-                copy(packetPaddingMaxBytes = event.value, message = null)
+                withPacketPaddingRange(rawMax = event.value)
             }
             is SettingsUiEvent.AutoReconnectChanged -> update {
                 copy(autoReconnect = event.value, message = null)
@@ -324,7 +325,6 @@ class SettingsViewModel @Inject constructor(
             val currentState = uiState.value
             runCatching {
                 val latestProfile = profileRepository.profile.first()
-                val wasRunning = connectionController.state.value.status == VpnConnectionStatus.Running
                 val userId = currentState.userId.trim()
                 require(userId.toLongOrNull()?.let { it > 0 } == true) {
                     strings().userIdMustBeNonNegativeInteger
@@ -404,6 +404,7 @@ class SettingsViewModel @Inject constructor(
                     disableIpv6 = disableIpv6,
                     packetFragmentPayloadBytes = packetFragmentPayloadBytes,
                     disablePacketBatching = currentState.disablePacketBatching,
+                    packetPaddingMode = currentState.packetPaddingMode,
                     packetPaddingMinBytes = packetPadding.first,
                     packetPaddingMaxBytes = packetPadding.second,
                     metrics = currentState.metrics.copy(fileEnabled = false, fileDir = ""),
@@ -417,11 +418,7 @@ class SettingsViewModel @Inject constructor(
                 require(VpnProfileCompatibilityValidator.firstIssue(savedProfile) == null) {
                     strings().configNeedsNewKeyBody
                 }
-                profileRepository.save(savedProfile)
-                if (wasRunning) {
-                    connectionController.stop()
-                    connectionController.start()
-                }
+                connectionController.updateProfile(savedProfile).getOrThrow()
                 savedProfile
             }.onSuccess { savedProfile ->
                 val savedState = savedProfile.toUiState(
@@ -520,18 +517,6 @@ class SettingsViewModel @Inject constructor(
         return value
     }
 
-    private fun parsePacketPaddingBytes(rawMin: String, rawMax: String): Pair<Int, Int> {
-        val min = rawMin.trim().ifBlank { "0" }.toIntOrNull()
-        val max = rawMax.trim().ifBlank { "0" }.toIntOrNull()
-        require(min != null && max != null && min in 0..1200 && max in 0..1200) {
-            "packet padding must be 0..1200 bytes."
-        }
-        require((min == 0 && max == 0) || min < max) {
-            "packet padding must be 0/0 or a random min/max range."
-        }
-        return min to max
-    }
-
     private fun strings() = maydayStrings(uiState.value.uiPreferences.language)
 
     private fun VpnProfile.toUiState(
@@ -552,7 +537,7 @@ class SettingsViewModel @Inject constructor(
                 )
             }.ifEmpty { listOf(RelayDraft()) },
             userId = userId,
-            servers = servers.sortedBy { it.priority.coerceAtLeast(1) }.mapIndexed { index, server ->
+            servers = servers.sortedBy { it.priority }.mapIndexed { index, server ->
                 ServerDraft(
                     id = server.id,
                     key = server.key,
@@ -572,8 +557,10 @@ class SettingsViewModel @Inject constructor(
             disableIpv6 = disableIpv6,
             packetFragmentPayloadBytes = packetFragmentPayloadBytes.toString(),
             disablePacketBatching = disablePacketBatching,
+            packetPaddingMode = packetPaddingMode,
             packetPaddingMinBytes = packetPaddingMinBytes.toString(),
             packetPaddingMaxBytes = packetPaddingMaxBytes.toString(),
+            lastValidPacketPaddingRange = packetPaddingMinBytes to packetPaddingMaxBytes,
             metrics = metrics,
             autoReconnect = isAutoReconnectEnabled,
             splitTunnelMode = splitTunnelMode,
@@ -621,6 +608,7 @@ class SettingsViewModel @Inject constructor(
             disableIpv6 = disableIpv6,
             packetFragmentPayloadBytes = packetFragmentPayloadBytes,
             disablePacketBatching = disablePacketBatching,
+            packetPaddingMode = packetPaddingMode,
             packetPaddingMinBytes = packetPaddingMinBytes,
             packetPaddingMaxBytes = packetPaddingMaxBytes,
             metrics = metrics,
@@ -656,6 +644,7 @@ private data class SettingsConfigSnapshot(
     val disableIpv6: Boolean,
     val packetFragmentPayloadBytes: String,
     val disablePacketBatching: Boolean,
+    val packetPaddingMode: PacketPaddingMode,
     val packetPaddingMinBytes: String,
     val packetPaddingMaxBytes: String,
     val metrics: VpnMetricsConfig,
@@ -677,56 +666,3 @@ private data class ServerConfigSnapshot(
     val key: String,
     val priority: String,
 )
-
-private fun String?.toTransportModeOptions(): List<TransportModeOption> {
-    val rawJson = this?.trim().orEmpty()
-    if (rawJson.isBlank()) {
-        return emptyList()
-    }
-
-    return runCatching {
-        val entries = if (rawJson.startsWith("[")) {
-            JSONArray(rawJson)
-        } else {
-            val root = JSONObject(rawJson)
-            root.optJSONArray("transports")
-                ?: root.optJSONArray("protocols")
-                ?: JSONArray()
-        }
-
-        buildList {
-            for (index in 0 until entries.length()) {
-                val item = entries.optJSONObject(index) ?: continue
-                val id = item.firstString("id", "protocol", "protocol_id", "transport")
-                val mode = VpnTransportMode.fromRuntimeId(id) ?: continue
-                val label = item.firstString("label", "name", "title").ifBlank { mode.runtimeId }
-                add(TransportModeOption(mode = mode, label = label))
-            }
-        }.sortedByTransportOrder()
-    }.getOrDefault(emptyList())
-}
-
-private fun List<TransportModeOption>.withFallbackForSelected(
-    selected: VpnTransportMode,
-): List<TransportModeOption> {
-    val options = if (any { it.mode == selected }) {
-        this
-    } else {
-        this + TransportModeOption(mode = selected, label = selected.runtimeId)
-    }
-    return options.sortedByTransportOrder()
-}
-
-private fun List<TransportModeOption>.sortedByTransportOrder(): List<TransportModeOption> {
-    return distinctBy { it.mode }
-}
-
-private fun JSONObject.firstString(vararg names: String): String {
-    names.forEach { name ->
-        val value = optString(name).trim()
-        if (value.isNotBlank()) {
-            return value
-        }
-    }
-    return ""
-}

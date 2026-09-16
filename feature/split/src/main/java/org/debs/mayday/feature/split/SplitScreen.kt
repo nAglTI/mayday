@@ -23,6 +23,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
@@ -104,6 +105,12 @@ internal fun SplitScreen(
                         onBackClick = { onEvent(SplitUiEvent.BackClicked) },
                         applyHorizontalPadding = false,
                     )
+                }
+
+                item {
+                    TextButton(onClick = { onEvent(SplitUiEvent.TunnelAccessClicked) }) {
+                        Text(tunnelAccessStrings(state.uiPreferences.language).title)
+                    }
                 }
 
                 if (state.isLoading) {

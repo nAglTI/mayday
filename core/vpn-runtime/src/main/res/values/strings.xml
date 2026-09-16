@@ -13,4 +13,5 @@
     <string name="mayday_vpn_tile_starting">starting</string>
     <string name="mayday_vpn_tile_stopping">stopping</string>
     <string name="mayday_vpn_tile_unavailable">permission required</string>
+    <string name="mayday_vpn_tile_error_disconnect">error · tap to disconnect</string>
 </resources>

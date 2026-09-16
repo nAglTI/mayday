@@ -13,6 +13,7 @@ data class HomeUiState(
     val detail: String = "",
     val engineAvailable: Boolean = false,
     val engineDiagnostics: String? = null,
+    val coreVersion: String? = null,
     val coreState: String = "",
     val vpnState: String = "",
     val activeRelayId: String = "",

@@ -28,6 +28,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -80,6 +81,9 @@ internal fun HomeScreen(
     val strings = maydayStrings(state.uiPreferences.language)
     val density = LocalMaydayDensity.current
     val isConnected = state.status == VpnConnectionStatus.Running
+    val canDisconnect = isConnected ||
+        (state.status == VpnConnectionStatus.Error &&
+            (state.vpnState == "active" || state.coreState == "degraded"))
     val isBusy = state.status == VpnConnectionStatus.Starting || state.status == VpnConnectionStatus.Stopping
     val statusText = localizedStatus(strings, state.status)
     val tunnelStatus = strings.vpnTunnelStatus(state.status)
@@ -114,6 +118,7 @@ internal fun HomeScreen(
                     if (hasProfileCompatibilityIssue) {
                         ConfigContractBanner(
                             strings = strings,
+                            unsupportedTransport = state.profileCompatibilityIssue?.type == VpnProfileCompatibilityIssueType.UNSUPPORTED_TRANSPORT,
                             onSettingsClick = { onEvent(HomeUiEvent.SettingsClicked) },
                         )
                     }
@@ -134,16 +139,16 @@ internal fun HomeScreen(
                         subtitle = subtitle,
                         actionText = when {
                             isBusy -> strings.connecting
-                            isConnected -> strings.disconnect
+                            canDisconnect -> strings.disconnect
                             else -> strings.connect
                         },
-                        onActionClick = if (isConnected || state.status == VpnConnectionStatus.Stopping) {
+                        onActionClick = if (canDisconnect || state.status == VpnConnectionStatus.Stopping) {
                             { onEvent(HomeUiEvent.DisconnectClicked) }
                         } else {
                             { onEvent(HomeUiEvent.ConnectClicked) }
                         },
                         filledAction = !isConnected,
-                        actionEnabled = !isBusy && (!hasProfileCompatibilityIssue || isConnected),
+                        actionEnabled = !isBusy && (!hasProfileCompatibilityIssue || canDisconnect),
                         actionLoading = isBusy,
                         showHalo = isConnected,
                     ) {
@@ -195,6 +200,7 @@ internal fun HomeScreen(
 @Composable
 private fun ConfigContractBanner(
     strings: MaydayStrings,
+    unsupportedTransport: Boolean,
     onSettingsClick: () -> Unit,
 ) {
     val density = LocalMaydayDensity.current
@@ -211,13 +217,21 @@ private fun ConfigContractBanner(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                text = strings.configNeedsNewKeyTitle,
+                text = if (unsupportedTransport) {
+                    if (strings.locale == AppLanguage.RU) "Режим подключения больше не поддерживается" else "Connection mode is no longer supported"
+                } else strings.configNeedsNewKeyTitle,
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Medium,
                 color = colors.error,
             )
             Text(
-                text = strings.configNeedsNewKeyBody,
+                text = if (unsupportedTransport) {
+                    if (strings.locale == AppLanguage.RU) {
+                        "Raw UDP v1 удалён из ядра. Выберите поддерживаемый режим для вашего ключа или импортируйте обновлённый ключ. Raw UDP v2 требует собственных настроек."
+                    } else {
+                        "Raw UDP v1 was removed from the core. Select a supported mode for your key or import an updated key. Raw UDP v2 needs its own settings."
+                    }
+                } else strings.configNeedsNewKeyBody,
                 style = MaterialTheme.typography.bodySmall,
                 color = colors.onErrorContainer,
             )
@@ -280,6 +294,14 @@ private fun AdvancedDiagnosticsCard(
     expanded: Boolean,
     onToggle: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val appVersion = remember(context) {
+        runCatching {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName
+        }.getOrNull()?.takeIf(String::isNotBlank)
+    }
+    val unknownVersion = if (strings.locale == AppLanguage.RU) "неизвестна" else "unknown"
     MaydaySurfaceCard {
         val interactionSource = remember { MutableInteractionSource() }
         Row(
@@ -314,6 +336,14 @@ private fun AdvancedDiagnosticsCard(
         }
 
         if (expanded) {
+            MaydayStatRow(
+                label = if (strings.locale == AppLanguage.RU) "Версия приложения" else "App version",
+                value = appVersion ?: unknownVersion
+            )
+            MaydayStatRow(
+                label = if (strings.locale == AppLanguage.RU) "Версия ядра" else "Core version",
+                value = state.coreVersion ?: unknownVersion
+            )
             MaydayStatRow(
                 label = strings.engine,
                 value = if (state.engineAvailable) strings.ready else strings.missing,
